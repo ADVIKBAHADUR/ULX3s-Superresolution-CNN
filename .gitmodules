@@ -1,3 +1,6 @@
 [submodule "Efficient-Teacher-Student-Distillative-Super-Resolution-Model"]
 	path = Efficient-Teacher-Student-Distillative-Super-Resolution-Model
 	url = https://github.com/ADVIKBAHADUR/Efficient-Teacher-Student-Distillative-Super-Resolution-Model
+[submodule "Resources/2dconv-FPGA"]
+	path = Resources/2dconv-FPGA
+	url = https://github.com/ivanvig/2dconv-FPGA/tree/master
