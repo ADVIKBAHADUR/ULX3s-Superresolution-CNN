@@ -1,0 +1,10 @@
+*.tmp/
+*.bit
+*.dump
+*.incd
+*_out.ncl
+*.ncd
+*.out
+*.twr
+*.config
+*.sdf
