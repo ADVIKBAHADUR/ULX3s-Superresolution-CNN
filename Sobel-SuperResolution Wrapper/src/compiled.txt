@@ -1,0 +1,2591 @@
+module sobel_convolution(	
+	input wire clk_w,clk_r,rst_n,
+	input wire[16:0] din, //data from camera fifo
+	input wire[9:0] data_count_r_sobel, //camera fifo data count
+	input wire rd_fifo, //sdram_interface will now start retrieving data from asyn_fifo
+	output reg rd_en,//read camera fifo
+	output reg rd_fifo_cam,
+	output wire[8:0] dout, //data to be stored in sdram
+	output wire[9:0] data_count_r //sobel fifo data count
+    );
+	 
+	 //FSM for combining the kernels which will then be stored in asyn_fifo
+	 localparam init=0,
+					loop=1;
+					
+	 reg state_q,state_d;
+	 reg signed[9:0] temp1_q,temp2_q,temp3_q;
+	 reg[10:0] pixel_counter_q=1920;
+	 reg first_line,second_line,third_line;
+	 reg we_1,we_2,we_3,we_4,we_5,we_6;
+	 reg signed[7:0] din_ram_x,din_ram_y;
+	 reg[9:0] addr_a_x,addr_a_y,addr_b_q,addr_b_d;
+	 reg write;
+	 reg signed[7:0] data_write;
+	 reg signed[7:0] x,y;
+	 
+	 wire temp_valid;
+	 wire[12:0] gray;
+	 wire signed[7:0] dout_1,dout_2,dout_3,dout_4,dout_5,dout_6;
+	 wire data_available= data_count_r_sobel!=10'd0 && data_count_r_sobel!=10'd1 && data_count_r_sobel!=10'd2 && data_count_r_sobel!=10'd3 && data_count_r_sobel!=10'd4 && data_count_r_sobel!=10'd5;
+
+	 
+	 //register operation
+	 always @(posedge clk_w,negedge rst_n) begin
+		if(!rst_n) begin
+			temp1_q<=0;
+			temp2_q<=0;
+			temp3_q<=0;
+			state_q<=0;
+			pixel_counter_q<=1920;
+			addr_b_q<=0;
+		end
+		else begin
+			state_q<=state_d;
+			rd_en=0;
+			addr_b_q<=addr_b_d;
+			rd_fifo_cam=0;
+			if(data_available) begin //grouping every three pixels for the kernel convolution
+				temp1_q<={3'b000,gray[7:3]};
+				temp2_q<=temp1_q;
+				temp3_q<=temp2_q;
+				pixel_counter_q<=(pixel_counter_q==1919 || pixel_counter_q==1920)? 0:pixel_counter_q+1'b1; //3 lines of pixel(640*3=1920)
+				rd_en=1;
+				rd_fifo_cam=1;
+			end
+		end
+	 end
+	 
+	 //assign gray=(din[15:11]+(din[10:5]>>1)+din[4:0])/3; //RGB to grayscale conversion using averaging method
+	 
+	 //better method
+	 wire[7:0] red,green,blue;
+	 assign red={din[15:11],3'b000},
+				green={din[10:5],2'b00},
+				blue={din[4:0],3'b000};
+	 
+	 assign gray=(red>>2)+(red>>5)+(red>>6) + (green>>1)+(green>>4)+(green>>5) + (blue>>3); 
+	 
+	 //Convolution pipeline logic
+	//data will be stored in block ram(which will be retrieved later by asyn_fifo)
+	 always @* begin
+		we_1=0;
+		we_2=0;
+		we_3=0;
+		we_4=0;
+		we_5=0;
+		we_6=0;
+		
+		din_ram_x=0; 
+		addr_a_x=0;
+		din_ram_y=0;
+		addr_a_y=0;
+		
+		if(pixel_counter_q!=1920) begin //data is now ready for convolution
+			if(first_line) begin //convolution for the first row of the 3x3 kernel
+				we_1=1;
+				addr_a_y= pixel_counter_q;
+				we_4=1;
+				addr_a_x = pixel_counter_q;
+			end
+			
+			else if(second_line) begin //convolution for the second row of the 3x3 kernel
+				we_2=1;
+				addr_a_y= pixel_counter_q-640;
+				we_5=1;
+				addr_a_x = pixel_counter_q-640;
+			end
+			
+			else if(third_line) begin //convolution for the third row of the 3x3 kernel
+				we_3=1;
+				addr_a_y= pixel_counter_q-1280;
+				we_6=1;
+				addr_a_x = pixel_counter_q-1280;
+			end
+			din_ram_y= temp1_q + temp2_q + temp3_q; //Y kernel
+			din_ram_x = -temp3_q + temp1_q; //X kernel
+		end
+		
+	 end
+	 
+	 //Finalize convolution by combining both kernels then store the result in asyn_fifo
+	 always @* begin
+		write=0;
+		data_write=0;
+		x=0;
+		y=0;
+		addr_b_d=addr_b_q;
+		state_d=state_q;
+		
+		case(state_q)
+			init: if(pixel_counter_q==0 && data_available) begin //no data yet
+						addr_b_d=0;
+						state_d=loop;			
+					end
+			loop: if(data_available) begin
+						addr_b_d=pixel_counter_q;
+						if(first_line) begin
+							addr_b_d=addr_b_d;
+							y=dout_1-dout_2; //convolution result for y kernel
+						end
+						else if(second_line) begin
+							addr_b_d=addr_b_d-640;
+							y=dout_2-dout_3; //convolution result for y kernel
+						end
+						else if(third_line) begin
+							addr_b_d=addr_b_d-1280;
+							y=dout_3-dout_1; //convolution result for y kernel
+						end
+						
+						x= dout_4 + dout_5 + dout_6; //convolution result for x kernel
+						write=1;
+						if(x[7]) x=~x; //get absolute value of x since convolution result CAN BE NEGATIVE
+						if(y[7]) y=~y; //get absolute value of y since convolution result CAN BE NEGATIVE 
+						data_write=x+y; //just take the sum since getting the quadratic sum will make this unnecessarily complicated(BUT QUADRATIC SUM IS THE CORRECT WAY)
+						
+					end
+		default: state_d=init;
+		endcase 
+	 end
+	 
+	 
+	 
+	 always @* begin //determines which pixel line the next data will be stored
+		first_line=0;
+		second_line=0; 
+		third_line=0;
+		if(pixel_counter_q<=639) first_line=1;
+		else if(pixel_counter_q<=1279) second_line=1;
+		else if(pixel_counter_q<=1919) third_line=1;
+	 
+	 end
+	 
+	 
+	 //module instantiations
+	 dual_port_sync #(.ADDR_WIDTH(10) , .DATA_WIDTH(8)) m0 //Matrix Y convolution row 1 
+	(
+		.clk_r(clk_w),
+		.clk_w(clk_w),
+		.we(we_1),
+		.din(din_ram_y),
+		.addr_a(addr_a_y), //write address
+		.addr_b(addr_b_d), //read address 
+		.dout(dout_1)
+	);
+	
+	dual_port_sync #(.ADDR_WIDTH(10) , .DATA_WIDTH(8)) m1 //Matrix Y convolution row 2
+	(
+		.clk_r(clk_w),
+		.clk_w(clk_w),
+		.we(we_2),
+		.din(din_ram_y),
+		.addr_a(addr_a_y), //write address
+		.addr_b(addr_b_d), //read address 
+		.dout(dout_2)
+	);
+	
+	dual_port_sync #(.ADDR_WIDTH(10) , .DATA_WIDTH(8)) m2 //Matrix Y convolution row 3
+	(
+		.clk_r(clk_w),
+		.clk_w(clk_w),
+		.we(we_3),
+		.din(din_ram_y),
+		.addr_a(addr_a_y), //write address
+		.addr_b(addr_b_d), //read address
+		.dout(dout_3)
+	);
+	
+	dual_port_sync #(.ADDR_WIDTH(10) , .DATA_WIDTH(8)) m3 //Matrix X convolution row 1
+	(
+		.clk_r(clk_w),
+		.clk_w(clk_w),
+		.we(we_4),
+		.din(din_ram_x),
+		.addr_a(addr_a_x), //write address
+		.addr_b(addr_b_d), //read address 
+		.dout(dout_4)
+	);
+	
+	dual_port_sync #(.ADDR_WIDTH(10) , .DATA_WIDTH(8)) m4  //Matrix X convolution row 2
+	(
+		.clk_r(clk_w),
+		.clk_w(clk_w),
+		.we(we_5),
+		.din(din_ram_x),
+		.addr_a(addr_a_x), //write address
+		.addr_b(addr_b_d), //read address ,addr_b is already buffered inside this module so we will use the "_d" ptr to advance the data(not "_q")
+		.dout(dout_5)
+	);
+	
+	dual_port_sync #(.ADDR_WIDTH(10) , .DATA_WIDTH(8)) m5  //Matrix X convolution row 3
+	(
+		.clk_r(clk_w),
+		.clk_w(clk_w),
+		.we(we_6),
+		.din(din_ram_x),
+		.addr_a(addr_a_x), //write address
+		.addr_b(addr_b_d), //read address ,addr_b is already buffered inside this module so we will use the "_d" ptr to advance the data(not "_q")
+		.dout(dout_6)
+	);
+	
+	asyn_fifo #(.DATA_WIDTH(9), .FIFO_DEPTH_WIDTH(10)) m6 //1024x8 FIFO mem  MUST BE 11 for FIFO_DEPTH_WIDTH or else grayscale will not be correct
+	(
+		.rst_n(rst_n),
+		.clk_write(clk_w),
+		.clk_read(clk_r),
+		.write(write),
+		.read(rd_fifo), 
+		.data_write({din[16],data_write}), //input FROM write clock domain
+		.data_read(dout), //output TO read clock domain
+		.full(),
+		.empty(), //full=sync to write domain clk , empty=sync to read domain clk
+		.data_count_r(data_count_r) 
+    );
+
+
+
+
+
+
+endmodule
+
+
+
+  module camera_interface(
+	input wire clk,clk_100,rst_n,
+	input wire[3:0] key, //key[1:0] for brightness control , key[3:2] for contrast control
+	//sobel
+	input wire rd_en_sobel,
+	output wire[16:0] dout_sobel,
+	output wire[9:0] data_count_r_sobel,
+	//camera fifo IO
+	input wire rd_en,
+	output wire[10:0] data_count_r,
+	output wire[16:0] dout,
+	//camera pinouts
+	input wire cmos_pclk,cmos_href,cmos_vsync,
+	input wire[7:0] cmos_db,
+	inout cmos_sda,cmos_scl, //i2c comm wires
+	output wire cmos_rst_n, cmos_pwdn, cmos_xclk,
+	//Debugging
+	output wire[7:0] led
+    );
+	 //FSM state declarations
+	 localparam idle=0,
+					start_sccb=1,
+					write_address=2,
+					write_data=3,
+					digest_loop=4,
+					delay=5,
+					vsync_fedge=6,
+					byte1=7,
+					byte2=8,
+					fifo_write=9,
+					stopping=10;
+					
+	 localparam wait_init=0,
+					sccb_idle=1,
+					sccb_address=2,
+					sccb_data=3,
+					sccb_stop=4;
+					
+	 localparam MSG_INDEX=77; //number of the last index to be digested by SCCB
+	 
+	 
+	 
+	 reg[3:0] state_q=0,state_d;
+	 reg[2:0] sccb_state_q=0,sccb_state_d;
+	 reg[7:0] addr_q,addr_d;
+	 reg[7:0] data_q,data_d;
+	 reg[7:0] brightness_q,brightness_d;
+	 reg[7:0] contrast_q,contrast_d;
+	 reg start,stop;
+	 reg[7:0] wr_data;
+	 reg[7:0] led_q=0,led_d; 
+	 reg[27:0] delay_q=0,delay_d;
+	 reg start_delay_q=0,start_delay_d;
+	 reg delay_finish;
+	 reg[15:0] message[250:0];
+	 reg[7:0] message_index_q=0,message_index_d;
+	 reg[16:0] pixel_q,pixel_d;
+	 reg wr_en;
+	 
+	 wire rd_tick;
+	 wire[1:0] ack;
+	 wire[7:0] rd_data;
+	 wire[3:0] state;
+	 wire full;
+	 wire key0_tick,key1_tick,key2_tick,key3_tick;
+	 wire empty_sobel;
+	 //reg[19:0] count_q=0,count_d;
+	 
+	 
+	 //buffer for all inputs coming from the camera
+	 reg pclk_1,pclk_2,href_1,href_2,vsync_1,vsync_2;
+
+	 
+	 initial begin //collection of all adddresses and values to be written in the camera
+				//{address,data}
+	 message[0]=16'h12_80;  //reset all register to default values
+	 message[1]=16'h12_04;  //set output format to RGB
+	 message[2]=16'h15_20;  //pclk will not toggle during horizontal blank
+	 message[3]=16'h40_d0;	//RGB565
+	 
+	// These are values scalped from https://github.com/jonlwowski012/OV7670_NEXYS4_Verilog/blob/master/ov7670_registers_verilog.v
+    message[4]= 16'h12_04; // COM7,     set RGB color output
+    message[5]= 16'h11_80; // CLKRC     internal PLL matches input clock
+    message[6]= 16'h0C_00; // COM3,     default settings
+    message[7]= 16'h3E_00; // COM14,    no scaling, normal pclock
+    message[8]= 16'h04_00; // COM1,     disable CCIR656
+    message[9]= 16'h40_d0; //COM15,     RGB565, full output range
+    message[10]= 16'h3a_04; //TSLB       set correct output data sequence (magic)
+	 message[11]= 16'h14_18; //COM9       MAX AGC value x4 0001_1000
+    message[12]= 16'h4F_B3; //MTX1       all of these are magical matrix coefficients
+    message[13]= 16'h50_B3; //MTX2
+    message[14]= 16'h51_00; //MTX3
+    message[15]= 16'h52_3d; //MTX4
+    message[16]= 16'h53_A7; //MTX5
+    message[17]= 16'h54_E4; //MTX6
+    message[18]= 16'h58_9E; //MTXS
+    message[19]= 16'h3D_C0; //COM13      sets gamma enable, does not preserve reserved bits, may be wrong?
+    message[20]= 16'h17_14; //HSTART     start high 8 bits
+    message[21]= 16'h18_02; //HSTOP      stop high 8 bits //these kill the odd colored line
+    message[22]= 16'h32_80; //HREF       edge offset
+    message[23]= 16'h19_03; //VSTART     start high 8 bits
+    message[24]= 16'h1A_7B; //VSTOP      stop high 8 bits
+    message[25]= 16'h03_0A; //VREF       vsync edge offset
+    message[26]= 16'h0F_41; //COM6       reset timings
+    message[27]= 16'h1E_00; //MVFP       disable mirror / flip //might have magic value of 03
+    message[28]= 16'h33_0B; //CHLF       //magic value from the internet
+    message[29]= 16'h3C_78; //COM12      no HREF when VSYNC low
+    message[30]= 16'h69_00; //GFIX       fix gain control
+    message[31]= 16'h74_00; //REG74      Digital gain control
+    message[32]= 16'hB0_84; //RSVD       magic value from the internet *required* for good color
+    message[33]= 16'hB1_0c; //ABLC1
+    message[34]= 16'hB2_0e; //RSVD       more magic internet values
+    message[35]= 16'hB3_80; //THL_ST
+    //begin mystery scaling numbers
+    message[36]= 16'h70_3a;
+    message[37]= 16'h71_35;
+    message[38]= 16'h72_11;
+    message[39]= 16'h73_f0;
+    message[40]= 16'ha2_02;
+    //gamma curve values
+    message[41]= 16'h7a_20;
+    message[42]= 16'h7b_10;
+    message[43]= 16'h7c_1e;
+    message[44]= 16'h7d_35;
+    message[45]= 16'h7e_5a;
+    message[46]= 16'h7f_69;
+    message[47]= 16'h80_76;
+    message[48]= 16'h81_80;
+    message[49]= 16'h82_88;
+    message[50]= 16'h83_8f;
+    message[51]= 16'h84_96;
+    message[52]= 16'h85_a3;
+    message[53]= 16'h86_af;
+    message[54]= 16'h87_c4;
+    message[55]= 16'h88_d7;
+    message[56]= 16'h89_e8;
+    //AGC and AEC
+    message[57]= 16'h13_e0; //COM8, disable AGC / AEC
+    message[58]= 16'h00_00; //set gain reg to 0 for AGC
+    message[59]= 16'h10_00; //set ARCJ reg to 0
+    message[60]= 16'h0d_40; //magic reserved bit for COM4
+    message[61]= 16'h14_18; //COM9, 4x gain + magic bit
+    message[62]= 16'ha5_05; // BD50MAX
+    message[63]= 16'hab_07; //DB60MAX
+    message[64]= 16'h24_95; //AGC upper limit
+    message[65]= 16'h25_33; //AGC lower limit
+    message[66]= 16'h26_e3; //AGC/AEC fast mode op region
+    message[67]= 16'h9f_78; //HAECC1
+    message[68]= 16'ha0_68; //HAECC2
+    message[69]= 16'ha1_03; //magic
+    message[70]= 16'ha6_d8; //HAECC3
+    message[71]= 16'ha7_d8; //HAECC4
+    message[72]= 16'ha8_f0; //HAECC5
+    message[73]= 16'ha9_90; //HAECC6
+    message[74]= 16'haa_94; //HAECC7
+    message[75]= 16'h13_e5; //COM8, enable AGC / AEC
+	// message[76]= 16'h1E_23; //Mirror Image
+	 message[77]= 16'h69_06; //gain of RGB(manually adjusted)
+  end
+	 
+	 //register operations
+	 always @(posedge clk_100,negedge rst_n) begin
+		if(!rst_n) begin
+			state_q<=0;
+			led_q<=0;
+			delay_q<=0;
+			start_delay_q<=0;
+			message_index_q<=0;
+			pixel_q<=0;
+			
+			sccb_state_q<=0;
+			addr_q<=0;
+			data_q<=0;
+			brightness_q<=0;
+			contrast_q<=0;
+			count_q<=0;
+		end
+		else begin
+			state_q<=state_d;
+			led_q<=led_d;
+			delay_q<=delay_d;
+			start_delay_q<=start_delay_d;
+			message_index_q<=message_index_d;			
+			pclk_1<=cmos_pclk; 
+			pclk_2<=pclk_1;
+			href_1<=cmos_href;
+			href_2<=href_1;
+			vsync_1<=cmos_vsync;
+			vsync_2<=vsync_1;
+			pixel_q<=pixel_d;
+			
+			sccb_state_q<=sccb_state_d;
+			addr_q<=addr_d;
+			data_q<=data_d;
+			brightness_q<=brightness_d;
+			contrast_q<=contrast_d;
+			//count_q<=count_d;
+		end
+	 end
+	 	 
+	 
+	 //FSM next-state logics
+	 always @* begin
+		state_d=state_q;
+		led_d=led_q;
+		start=0;
+		stop=0;
+		wr_data=0;
+		start_delay_d=start_delay_q;
+		delay_d=delay_q;
+		delay_finish=0;
+		message_index_d=message_index_q;
+		pixel_d=pixel_q;
+		wr_en=0;
+		
+		sccb_state_d=sccb_state_q;
+		addr_d=addr_q;
+		data_d=data_q;
+		brightness_d=brightness_q;
+		contrast_d=contrast_q;
+		//count_d=count_q;
+		
+		//delay logic  
+		if(start_delay_q) delay_d=delay_q+1'b1;
+		if(delay_q[16] && message_index_q!=(MSG_INDEX+1) && (state_q!=start_sccb))  begin  //delay between SCCB transmissions (0.66ms)
+			delay_finish=1;
+			start_delay_d=0;
+			delay_d=0;
+		end
+		else if((delay_q[26] && message_index_q==(MSG_INDEX+1)) || (delay_q[26] && state_q==start_sccb)) begin //delay BEFORE SCCB transmission, AFTER SCCB transmission, and BEFORE retrieving pixel data from camera (0.67s)
+			delay_finish=1;
+			start_delay_d=0;
+			delay_d=0;
+		end
+		
+		case(state_q) 
+		
+					////////Begin: Setting register values of the camera via SCCB///////////
+					
+			  idle:  if(delay_finish) begin //idle for 0.6s to start-up the camera
+							state_d=start_sccb; 
+							start_delay_d=0;
+						end
+						else start_delay_d=1;
+
+		start_sccb:  begin   //start of SCCB transmission
+							start=1;
+							wr_data=8'h42; //slave address of OV7670 for write
+							state_d=write_address;	
+						end
+	 write_address: if(ack==2'b11) begin 
+							wr_data=message[message_index_q][15:8]; //write address
+							state_d=write_data;
+						end
+		 write_data: if(ack==2'b11) begin 
+							wr_data=message[message_index_q][7:0]; //write data
+							state_d=digest_loop;
+						end
+	  digest_loop: if(ack==2'b11) begin //stop sccb transmission
+							stop=1;
+							start_delay_d=1;
+							message_index_d=message_index_q+1'b1;
+							state_d=delay;
+						end
+			  delay: begin
+							if(message_index_q==(MSG_INDEX+1) && delay_finish) begin 
+								state_d=vsync_fedge; //if all messages are already digested, proceed to retrieving camera pixel data
+								led_d=8'b0011_0011; //red LEDs
+							end
+							else if(state==0 && delay_finish) state_d=start_sccb; //small delay before next SCCB transmission(if all messages are not yet digested)
+						end
+			  
+			  
+
+				///////////////Begin: Retrieving Pixel Data from Camera to be Stored to SDRAM/////////////////
+				
+		vsync_fedge: if(vsync_1==1 && vsync_2==1) begin	
+							state_d=byte1; //vsync falling edge means new frame is incoming
+							pixel_d[16]=1;
+					 end
+				byte1: begin
+						if(pclk_1==1 && pclk_2==0 && href_1==1 && href_2==1) begin //rising edge of pclk means new pixel data(first byte of 16-bit pixel RGB565) is available at output
+								pixel_d[15:8]=cmos_db;
+								state_d=byte2;
+						 end
+						 else if(vsync_1==1 && vsync_2==1) begin //new frame incoming
+							pixel_d[16]=1;
+						 end
+					  end
+				byte2: if(pclk_1==1 && pclk_2==0 && href_1==1 && href_2==1) begin //rising edge of pclk means new pixel data(second byte of 16-bit pixel RGB565) is available at output
+								pixel_d[7:0]=cmos_db;
+								state_d=fifo_write;
+								//count_d=(count_q<307200)? (count_q+1'b1):0;
+						 end
+						 else if(vsync_1==1 && vsync_2==1) begin
+							state_d=vsync_fedge;
+						 end
+		 fifo_write: begin //write the 16-bit data to asynchronous fifo to be retrieved later by SDRAM
+								wr_en=1;
+								state_d=byte1;
+								led_d=8'b1100_1100; //debugging led
+								pixel_d[16]=0;
+						 end
+		default: state_d=idle;
+		endcase
+		
+		//Logic for increasing/decreasing brightness and contrast via the 4 keybuttons
+		case(sccb_state_q)
+			wait_init: if(state_q==byte1) begin //wait for initial SCCB transmission to finish
+							sccb_state_d=sccb_idle;
+							addr_d=0;
+							data_d=0;
+							brightness_d=8'h00; 
+							contrast_d=8'h40;
+						  end
+			sccb_idle: if(state==0) begin //wait for any pushbutton
+								if(key0_tick) begin//increase brightness
+									brightness_d=(brightness_q[7]==1)? brightness_q-5:brightness_q+5;
+									if(brightness_q==8'h80) brightness_d=0;
+									start=1;
+									wr_data=8'h42; //slave address of OV7670 for write
+									addr_d=8'h55; //brightness control address
+									data_d=brightness_d;
+									sccb_state_d=sccb_address;
+									led_d=0;
+								end
+								if(key1_tick) begin //decrease brightness
+									brightness_d=(brightness_q[7]==1)? brightness_q+5:brightness_q-5;
+									if(brightness_q==0) brightness_d=8'h80;
+									start=1;
+									wr_data=8'h42; 
+									addr_d=8'h55;
+									data_d=brightness_d;
+									sccb_state_d=sccb_address;
+									led_d=0;
+								end
+								else if(key2_tick) begin //increase contrast
+									contrast_d=contrast_q+5;
+									start=1;
+									wr_data=8'h42; //slave address of OV7670 for write
+									addr_d=8'h56; //contrast control address
+									data_d=contrast_d;
+									sccb_state_d=sccb_address;
+									led_d=0;
+								end
+								else if(key3_tick) begin //decrease contrast
+									contrast_d=contrast_q-5;
+									start=1;
+									wr_data=8'h42;
+									addr_d=8'h56;
+									data_d=contrast_d;
+									sccb_state_d=sccb_address;
+									led_d=0;
+								end
+						  end
+		sccb_address: if(ack==2'b11) begin 
+							wr_data=addr_q; //write address
+							sccb_state_d=sccb_data;
+						end
+		  sccb_data: if(ack==2'b11) begin 
+							wr_data=data_q; //write databyte
+							sccb_state_d=sccb_stop;
+						 end
+		  sccb_stop: if(ack==2'b11) begin //stop
+							stop=1;
+							sccb_state_d=sccb_idle;
+							led_d=4'b1001;
+						 end
+			 default: sccb_state_d=wait_init;
+		endcase
+		
+		//debug
+		/*if(count_q<38400) pixel_d={{5{1'b0}},{6{1'b0}},{5{1'b0}}};
+		else if(count_q<76800) pixel_d={{5{1'b0}},{6{1'b0}},{5{1'b1}}};
+		else if(count_q<115200) pixel_d={{5{1'b0}},{6{1'b1}},{5{1'b0}}};
+		else if(count_q<153600) pixel_d={{5{1'b0}},{6{1'b1}},{5{1'b1}}};
+		else if(count_q<192000) pixel_d={{5{1'b1}},{6{1'b0}},{5{1'b0}}};
+		else if(count_q<230400) pixel_d={{5{1'b1}},{6{1'b0}},{5{1'b1}}};
+		else if(count_q<268800) pixel_d={{5{1'b1}},{6{1'b1}},{5{1'b0}}};
+		else if(count_q<307200) pixel_d={{5{1'b1}},{6{1'b1}},{5{1'b1}}};*/
+		led_d=(empty_sobel || full) ? 8'b1111_1111:led_d;
+	 end
+	 
+
+	 assign cmos_pwdn=0; 
+	 assign cmos_rst_n=1;
+	 assign led=led_q;
+	 
+	 //module instantiations
+	 i2c_top #(.main_clock(143_000_000), .freq(100_000)) m0
+	(
+		.clk(clk_100),
+		.rst_n(rst_n),
+		.start(start),
+		.stop(stop),
+		.wr_data(wr_data),
+		.rd_tick(rd_tick), //ticks when read data from servant is ready,data will be taken from rd_data
+		.ack(ack), //ack[1] ticks at the ack bit[9th bit],ack[0] asserts when ack bit is ACK,else NACK
+		.rd_data(rd_data), 
+		.scl(cmos_scl),
+		.sda(cmos_sda),
+		.state(state)
+    ); 
+	 
+	 
+	assign cmos_xclk=clk;
+	 
+
+	asyn_fifo #(.DATA_WIDTH(17),.FIFO_DEPTH_WIDTH(10)) m2 //1024x16 FIFO mem
+	(
+		.rst_n(rst_n),
+		.clk_write(clk_100),
+		.clk_read(clk_100), //clock input from both domains
+		.write(wr_en),
+		.read(rd_en), 
+		.data_write(pixel_q), //input FROM write clock domain
+		.data_read(dout), //output TO read clock domain
+		.full(),
+		.empty(), //full=sync to write domain clk , empty=sync to read domain clk
+		.data_count_r(data_count_r) 
+    );
+
+	asyn_fifo #(.DATA_WIDTH(17),.FIFO_DEPTH_WIDTH(10)) m3 //1024x16 FIFO mem  FIFO_DEPTH_WIDTH=10 for prppoer output
+	(
+		.rst_n(rst_n),
+		.clk_write(clk_100),
+		.clk_read(clk), //clock input from both domains
+		.write(wr_en),
+		.read(rd_en_sobel), 
+		.data_write(pixel_q), //input FROM write clock domain
+		.data_read(dout_sobel), //output TO read clock domain
+		.full(full),
+		.empty(empty_sobel), //full=sync to write domain clk , empty=sync to read domain clk
+		.data_count_r(data_count_r_sobel) 
+    );
+	
+	debounce_explicit m4
+	(
+		.clk(clk_100),
+		.rst_n(rst_n),
+		.sw({key[0]}),
+		.db_level(),
+		.db_tick(key0_tick)
+    );
+	 
+	debounce_explicit m5
+	(
+		.clk(clk_100),
+		.rst_n(rst_n),
+		.sw({key[1]}),
+		.db_level(),
+		.db_tick(key1_tick)
+    );
+	 
+	 debounce_explicit m6
+	(
+		.clk(clk_100),
+		.rst_n(rst_n),
+		.sw({key[2]}),
+		.db_level(),
+		.db_tick(key2_tick)
+    );
+	 
+	 debounce_explicit m7
+	(
+		.clk(clk_100),
+		.rst_n(rst_n),
+		.sw({key[3]}),
+		.db_level(),
+		.db_tick(key3_tick)
+    );
+	
+endmodule
+
+
+module asyn_fifo
+	#(
+		parameter DATA_WIDTH=8,
+					 FIFO_DEPTH_WIDTH=11  //total depth will then be 2**FIFO_DEPTH_WIDTH
+	)
+	(
+	input wire rst_n,
+	input wire clk_write,clk_read, //clock input from both domains
+	input wire write,read, 
+	input wire [DATA_WIDTH-1:0] data_write, //input FROM write clock domain
+	output wire [DATA_WIDTH-1:0] data_read, //output TO read clock domain
+	output reg full,empty, //full=sync to write domain clk , empty=sync to read domain clk
+	output reg[FIFO_DEPTH_WIDTH-1:0] data_count_w,data_count_r //counts number of data left in fifo memory(sync to either write or read clk)
+    );
+	 
+	 
+	 /*
+	 async_fifo #(.DATA_WIDTH(16),.FIFO_DEPTH_WIDTH(10)) m2 //1024x16 FIFO mem
+	(
+		.rst_n(rst_n),
+		.clk_write(),
+		.clk_read(), //clock input from both domains
+		.write(),
+		.read(), 
+		.data_write(), //input FROM write clock domain
+		.data_read(), //output TO read clock domain
+		.full(),
+		.empty(), //full=sync to write domain clk , empty=sync to read domain clk
+		..data_count_w(),
+		.data_count_r() //counts number of data left in fifo memory(sync to either write or read clk)
+    );
+	 */
+	 
+	 
+	 localparam FIFO_DEPTH=2**FIFO_DEPTH_WIDTH;
+	 
+	 initial begin
+		full=0;
+		empty=1;
+		//data_count_w=0;
+		//data_count_r=0;
+	 end
+	 
+	 
+	 ///////////////////WRITE CLOCK DOMAIN//////////////////////////////
+	 reg[FIFO_DEPTH_WIDTH:0] w_ptr_q=0; //binary counter for write pointer
+	 reg[FIFO_DEPTH_WIDTH:0] r_ptr_sync; //binary pointer for read pointer sync to write clk
+	 wire[FIFO_DEPTH_WIDTH:0] w_grey,w_grey_nxt; //grey counter for write pointer
+	 reg[FIFO_DEPTH_WIDTH:0] r_grey_sync; //grey counter for the read pointer synchronized to write clock
+	 
+	 wire we;
+	 reg[3:0] i; //log_2(FIFO_DEPTH_WIDTH)
+	 
+	 assign w_grey=w_ptr_q^(w_ptr_q>>1); //binary to grey code conversion for current write pointer
+	 assign w_grey_nxt=(w_ptr_q+1'b1)^((w_ptr_q+1'b1)>>1);  //next grey code
+	 assign we= write && !full; 
+	 
+	 //register operation
+	 always @(posedge clk_write,negedge rst_n) begin
+		if(!rst_n) begin
+			w_ptr_q<=0;
+			full<=0;
+		end
+		else begin
+			if(write && !full) begin //write condition
+				w_ptr_q<=w_ptr_q+1'b1; 
+				full <= w_grey_nxt == {~r_grey_sync[FIFO_DEPTH_WIDTH:FIFO_DEPTH_WIDTH-1],r_grey_sync[FIFO_DEPTH_WIDTH-2:0]}; //algorithm for full logic which can be observed on the grey code table
+			end
+			else full <= w_grey == {~r_grey_sync[FIFO_DEPTH_WIDTH:FIFO_DEPTH_WIDTH-1],r_grey_sync[FIFO_DEPTH_WIDTH-2:0]}; 
+			
+			for(i=0;i<=FIFO_DEPTH_WIDTH;i=i+1) r_ptr_sync[i]=^(r_grey_sync>>i); //grey code to binary converter 
+			data_count_w <= (w_ptr_q>=r_ptr_sync)? (w_ptr_q-r_ptr_sync):(FIFO_DEPTH-r_ptr_sync+w_ptr_q); //compares write pointer and sync read pointer to generate data_count
+		end							
+	 end
+
+	/////////////////////////////////////////////////////////////////////
+	 
+	 
+	  ///////////////////READ CLOCK DOMAIN//////////////////////////////
+	 reg[FIFO_DEPTH_WIDTH:0] r_ptr_q=0; //binary counter for read pointer
+	 wire[FIFO_DEPTH_WIDTH:0] r_ptr_d;
+	 reg[FIFO_DEPTH_WIDTH:0] w_ptr_sync; //binary counter for write pointer sync to read clk
+	 reg[FIFO_DEPTH_WIDTH:0] w_grey_sync; //grey counter for the write pointer synchronized to read clock
+	 wire[FIFO_DEPTH_WIDTH:0] r_grey,r_grey_nxt; //grey counter for read pointer 
+	 
+	 
+	 assign r_grey= r_ptr_q^(r_ptr_q>>1);  //binary to grey code conversion
+	 assign r_grey_nxt= (r_ptr_q+1'b1)^((r_ptr_q+1'b1)>>1); //next grey code
+	 assign r_ptr_d= (read && !empty)? r_ptr_q+1'b1:r_ptr_q;
+	 
+	 //register operation
+	 always @(posedge clk_read,negedge rst_n) begin
+		if(!rst_n) begin
+			r_ptr_q<=0;
+			empty<=1;
+		end
+		else begin
+			r_ptr_q<=r_ptr_d;
+			if(read && !empty) empty <= r_grey_nxt==w_grey_sync;//empty condition
+			else empty <= r_grey==w_grey_sync; 
+			
+			for(i=0;i<=FIFO_DEPTH_WIDTH;i=i+1) w_ptr_sync[i]=^(w_grey_sync>>i); //grey code to binary converter
+			data_count_r = (w_ptr_q>=r_ptr_sync)? (w_ptr_q-r_ptr_sync):(FIFO_DEPTH-r_ptr_sync+w_ptr_q); //compares read pointer to sync write pointer to generate data_count
+		end
+	 end
+	 ////////////////////////////////////////////////////////////////////////
+	 
+	 
+	 /////////////////////CLOCK DOMAIN CROSSING//////////////////////////////
+	 reg[FIFO_DEPTH_WIDTH:0] r_grey_sync_temp;
+	 reg[FIFO_DEPTH_WIDTH:0] w_grey_sync_temp;
+	 always @(posedge clk_write) begin //2 D-Flipflops for reduced metastability in clock domain crossing from READ DOMAIN to WRITE DOMAIN
+		r_grey_sync_temp<=r_grey; 
+		r_grey_sync<=r_grey_sync_temp;
+	 end
+	 always @(posedge clk_read) begin //2 D-Flipflops for reduced metastability in clock domain crossing from WRITE DOMAIN to READ DOMAIN
+		w_grey_sync_temp<=w_grey;
+		w_grey_sync<=w_grey_sync_temp;
+	 end
+	 
+	//////////////////////////////////////////////////////////////////////////
+	 
+	 
+	 
+	//instantiation of dual port block ram
+	dual_port_sync #(.ADDR_WIDTH(FIFO_DEPTH_WIDTH) , .DATA_WIDTH(DATA_WIDTH)) m0
+	(
+		.clk_r(clk_read),
+		.clk_w(clk_write),
+		.we(we),
+		.din(data_write),
+		.addr_a(w_ptr_q[FIFO_DEPTH_WIDTH-1:0]), //write address
+		.addr_b(r_ptr_d[FIFO_DEPTH_WIDTH-1:0] ), //read address ,addr_b is already buffered inside this module so we will use the "_d" ptr to advance the data(not "_q")
+		.dout(data_read)
+	);
+
+endmodule
+
+
+
+	//inference template for dual port block ram
+module dual_port_sync
+	#(
+		parameter ADDR_WIDTH=11, //2k by 8 dual port synchronous ram(16k block ram)
+					 DATA_WIDTH=8
+	)
+	(
+		input clk_r,
+		input clk_w,
+		input we, 
+		input[DATA_WIDTH-1:0] din,
+		input[ADDR_WIDTH-1:0] addr_a,addr_b, //addr_a for write, addr_b for read
+		output[DATA_WIDTH-1:0] dout
+	);
+	
+	reg[DATA_WIDTH-1:0] ram[2**ADDR_WIDTH-1:0];
+	reg[ADDR_WIDTH-1:0] addr_b_q;
+	
+	always @(posedge clk_w) begin
+		if(we) ram[addr_a]<=din;
+	end
+	always @(posedge clk_r) begin
+		addr_b_q<=addr_b;	
+	end
+	assign dout=ram[addr_b_q];
+
+endmodule
+
+
+
+module debounce_explicit(
+	input wire clk,rst_n,
+	input wire sw,
+	output reg db_level,db_tick
+    );
+	/*
+	
+	debounce_explicit
+	(
+		.clk(clk),
+		.rst_n(rst_n),
+		.sw(sw),
+		.db_level(),
+		.db_tick(key_tick)
+    );
+	 
+	 */
+	 
+	 //FSM symbolic declaration
+	 localparam[1:0]  idle=2'b00,
+							delay0=2'b01,
+							one=2'b10,
+							delay1=2'b11;
+	 localparam N=21; //21 bits is 42ms -> 2^N/50MHz=42ms
+	 reg[1:0] state_reg,state_nxt;
+	 reg[N-1:0] timer_reg,timer_nxt;
+	 reg timer_zero,timer_inc,timer_tick; //control and status signal
+	 
+	 //FSM and timer register
+	 always @(posedge clk,negedge rst_n) begin
+		if(!rst_n) begin
+			state_reg<=idle;
+			timer_reg<=0;
+		end
+		else begin
+			state_reg<=state_nxt;
+			timer_reg<=timer_nxt;
+		end
+	 end
+	 
+	 //FSM control path next-state logic
+	 always @* begin
+		state_nxt=state_reg;
+		timer_zero=0;
+		timer_inc=0;
+		db_tick=0;
+		db_level=0;       
+		
+		case(state_reg)
+			  idle: if(sw==1) begin
+							timer_zero=1; //load the timer with value of zero
+							state_nxt=delay0;
+					  end
+			delay0: if(sw==1) begin
+							timer_inc=1;//increment timer by 1
+							if(timer_tick) begin //if timer reaches the max(nxt edge will wrap the timer to zero again)
+								state_nxt=one; 
+								db_tick=1;
+							end
+					  end
+					  else state_nxt=idle;
+		      one: begin
+							db_level=1;
+							if(sw==0) begin
+								timer_zero=1;  //load the timer with value of zero
+								state_nxt=delay1;
+							end
+					  end
+		   delay1: begin
+							db_level=1;
+							if(sw==0) begin
+								timer_inc=1;
+								if(timer_tick) //if timer reaches the max(wherein the nxt edge will wrap the timer to zero again)
+									state_nxt=idle;
+							end
+							else state_nxt=one;
+					   end
+			 default: state_nxt=idle;
+			endcase					
+		end
+		
+		//Datapath(timer) logic and operation
+		always @* begin
+			timer_nxt=timer_reg;
+			if(timer_zero) timer_nxt=0; //load zero 
+			else if(timer_inc) timer_nxt=timer_reg+1; //increment by one
+			timer_tick=(timer_reg=={N{1'b1}})?1:0; //notify if timer is already at max
+		end
+
+
+endmodule
+/*
+my_hdmi_device 
+
+Copyright (C) 2021  Hirosh Dabui <hirosh@dabui.de>
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+*/
+module hdmi_device
+	#(parameter DDR_ENABLED = 0)
+
+	(
+           input pclk,
+           input tmds_clk, /* 10 times faster of pclk(IF SDR)*/
+
+           input [7:0] in_vga_red,
+           input [7:0] in_vga_green,
+           input [7:0] in_vga_blue,
+
+           input in_vga_blank,
+           input in_vga_vsync,
+           input in_vga_hsync,
+
+           output [DDR_ENABLED:0] out_tmds_red,
+           output [DDR_ENABLED:0] out_tmds_green,
+           output [DDR_ENABLED:0] out_tmds_blue,
+           output [DDR_ENABLED:0] out_tmds_clk
+       );
+
+
+localparam OUT_TMDS_MSB = DDR_ENABLED ? 1 : 0;
+
+/* */
+wire [9:0] tmds_red;
+wire [9:0] tmds_green;
+wire [9:0] tmds_blue;
+tmds_encoder tmsds_encoder_i0(pclk, ~in_vga_blank, in_vga_red,   0,          0,              tmds_red);
+tmds_encoder tmsds_encoder_i1(pclk, ~in_vga_blank, in_vga_green, 0,          0,              tmds_green);
+tmds_encoder tmsds_encoder_i2(pclk, ~in_vga_blank, in_vga_blue,  in_vga_vsync, in_vga_hsync, tmds_blue);
+
+/**/
+reg       tmds_shift_load   = 0;
+reg [3:0] tmds_modulo       = 0;
+reg [9:0] tmds_shift_red    = 0;
+reg [9:0] tmds_shift_green  = 0;
+reg [9:0] tmds_shift_blue   = 0;
+reg [9:0] tmds_shift_clk    = 0;
+
+wire [9:0] tmds_pixel_clk = 10'b00000_11111;
+
+
+wire max_shifts_reached = tmds_modulo == (DDR_ENABLED ? 4 : 9);
+always @(posedge tmds_clk) tmds_modulo      <= max_shifts_reached ? 0 : tmds_modulo + 1;
+always @(posedge tmds_clk) tmds_shift_load  <= max_shifts_reached;
+
+always @(posedge tmds_clk) begin //shifts 2-bits at a time if DDR is enabled, else shift 1-bit at a time
+    tmds_shift_red    <= tmds_shift_load ? tmds_red       : {DDR_ENABLED ? 2'b00 : 1'b0, tmds_shift_red   [9: DDR_ENABLED ? 2 : 1]};
+    tmds_shift_green  <= tmds_shift_load ? tmds_green     : {DDR_ENABLED ? 2'b00 : 1'b0, tmds_shift_green [9: DDR_ENABLED ? 2 : 1]};
+    tmds_shift_blue   <= tmds_shift_load ? tmds_blue      : {DDR_ENABLED ? 2'b00 : 1'b0, tmds_shift_blue  [9: DDR_ENABLED ? 2 : 1]};
+    tmds_shift_clk    <= tmds_shift_load ? tmds_pixel_clk : {DDR_ENABLED ? 2'b00 : 1'b0, tmds_shift_clk   [9: DDR_ENABLED ? 2 : 1]};
+end
+
+assign out_tmds_clk   = tmds_shift_clk    [ OUT_TMDS_MSB : 0 ];
+assign out_tmds_red   = tmds_shift_red    [ OUT_TMDS_MSB : 0 ];
+assign out_tmds_green = tmds_shift_green  [ OUT_TMDS_MSB : 0 ];
+assign out_tmds_blue  = tmds_shift_blue   [ OUT_TMDS_MSB : 0 ];
+
+endmodule
+
+`timescale 1ns / 1ps
+
+module i2c_top //works on both i2c and SCCB mode(no pullups resistors needed) [NO REPEATED START ALLOWED]
+	#(parameter main_clock=25_000_000, freq=100_000, addr_bytes=2) //addr_bytes=number of bytes of an address
+	(
+	input wire clk, rst_n,
+	input wire start,stop,
+	input wire[7:0] wr_data,
+	output reg rd_tick, //ticks when read data from servant is ready,data will be taken from rd_data
+	output reg[1:0] ack, //ack[1] ticks at the ack bit[9th bit],ack[0] asserts when ack bit is ACK,else NACK
+	output wire[7:0] rd_data, 
+	inout scl,sda, 
+	output wire[3:0] state
+    ); 
+	 
+	 /*
+	 i2c_top #(.freq(100_000)) m0
+	(
+		.clk(clk),
+		.rst_n(rst_n),
+		.start(start),
+		.stop(stop),
+		.wr_data(wr_data),
+		.rd_tick(rd_tick), //ticks when read data from servant is ready,data will be taken from rd_data
+		.ack(ack), //ack[1] ticks at the ack bit[9th bit],ack[0] asserts when ack bit is ACK,else NACK
+		.rd_data(rd_data), 
+		.scl(scl),
+		.sda(sda)
+    ); 
+	 */
+	 
+	 localparam full= (main_clock)/(2*freq),
+					half= full/2,
+					counter_width=log2(full);
+	 function integer log2(input integer n); //automatically determines the width needed by counter
+		integer i;
+		 begin
+			log2=1;
+			for(i=0;2**i<n;i=i+1)
+				log2=i+1;
+		 end
+	 endfunction
+		 
+	 //FSM state declarations
+	 localparam[3:0] 		idle=0,
+							starting=1,
+							packet=2,
+							ack_servant=3,
+							read=4,
+							ack_master=5,
+							stop_1=6,
+							stop_2=7;
+	 reg[3:0] state_q=idle,state_d;
+	 reg op_q=0,op_d;
+	 reg[3:0] idx_q=0,idx_d;
+	 reg[8:0] wr_data_q=0,wr_data_d;
+	 reg[7:0] rd_data_q,rd_data_d;
+	 reg scl_q=0,scl_d;
+	 reg sda_q=0,sda_d;
+	 reg[counter_width-1:0] counter_q=0,counter_d;
+	 reg[1:0] addr_bytes_q=0,addr_bytes_d;
+	 wire scl_lo,scl_hi;
+	 wire sda_in;
+	//register operations
+	 always@(posedge clk, negedge rst_n) begin
+		if(!rst_n) begin
+			state_q<=idle;
+			idx_q<=0;
+			wr_data_q<=0;
+			scl_q<=0;
+			sda_q<=0;
+			counter_q<=0;
+			rd_data_q<=0;
+			addr_bytes_q<=0;
+		end
+		else begin
+			state_q<=state_d;
+			op_q<=op_d;
+			idx_q<=idx_d;
+			wr_data_q<=wr_data_d;
+			scl_q<=scl_d;
+			sda_q<=sda_d;
+			counter_q<=counter_d;
+			rd_data_q<=rd_data_d;
+			addr_bytes_q<=addr_bytes_d;
+		end
+	 end
+	 
+	 
+	 //free-running clk, freq depends on parameter "freq"
+	 always @* begin
+		counter_d=counter_q+1;
+		scl_d=scl_q;
+		if(state_q==idle || state_q==starting) scl_d=1'b1;
+		else if(counter_q==full) begin
+			counter_d=0;
+			scl_d=(scl_q==0)?1'b1:1'b0;
+		end
+	 end
+	 
+	 
+	 //FSM next-state logic
+	 always @* begin
+		state_d=state_q;
+		op_d=op_q;
+		idx_d=idx_q;
+		wr_data_d=wr_data_q;
+		rd_data_d=rd_data_q;
+		addr_bytes_d=addr_bytes_q;
+		sda_d=sda_q;
+		ack=0;
+		rd_tick=0;
+		
+		case(state_q)
+					idle: begin		//wait for the "start" to assert
+								sda_d=1'b1;
+								addr_bytes_d=addr_bytes; 
+								if(start==1'b1) begin
+									wr_data_d={wr_data,1'b1}; //the last 1'b1 is for the ACK coming from the servant("1" means high impedance or "reading")
+									op_d= (wr_data[0])? 1:0; // if last bit(R/W bit) is one:read operation, else write operation
+									idx_d=8; //index to be used on transmitting the wr_data serially(MSB first)
+									state_d=starting;
+								end
+							 end
+							 
+				starting: if(scl_hi) begin //start command, change sda to low while scl is high
+								sda_d=0;
+								state_d=packet;
+							 end
+							 
+				  packet: if(scl_lo) begin //transmit wr_data serially(MSB first)
+								sda_d= (wr_data_q[idx_q]==0)? 0:1'b1;
+								idx_d= idx_q-1;
+								if(idx_q==0) begin
+									state_d=ack_servant;
+									idx_d=0;
+								end
+							 end
+  							 
+			ack_servant: if(scl_hi) begin //wait for ACK bit response(9th bit) from servant
+								ack[1]=1;
+								ack[0]=!sda_in; 
+								wr_data_d={wr_data,1'b1}; //after acknowledge tick, master must have already have the next data it wants to give
+								addr_bytes_d=addr_bytes_q-1;
+								if(stop) state_d=stop_1; //master can forcefully stops the transaction(even if response is either NACK or ACK)
+								else if(op_q && addr_bytes_q==0) begin //start reading after writing addr_bytes of packets for address
+									idx_d=7;
+									state_d=read;
+								end
+								else begin //write next packet
+									idx_d=8;
+									state_d=packet; 
+								end
+							 end
+							 
+					 read: if(scl_hi) begin //read data from slave(MSB first)
+								rd_data_d[idx_q]=sda_in;
+								idx_d=idx_q-1;
+								if(idx_q==0) state_d=ack_master;
+							 end
+							 
+			 ack_master: if(scl_lo) begin //master must ACK after receiving data from servant
+								sda_d=1'b0; 
+								if(sda_q==0) begin //one whole bit(two scl_lo) had passed
+									rd_tick=1;
+									idx_d=7;
+									if(stop) state_d=stop_1; //after receiving data, master can opt to stop
+									else state_d=read; ///after receiving data, master can also just continue receving more data
+								end
+							 end
+				  stop_1: if(scl_lo) begin
+								sda_d=1'b0;
+								state_d=stop_2;
+							 end
+				  stop_2: if(scl_hi) begin
+								sda_d=1'b1;
+								state_d=idle;
+							 end
+				 default: state_d=idle;
+		endcase
+	 end
+	 
+	 /*
+	 //i2c output logic
+	 assign scl=scl_q? 1'bz:0; //bidiectional logic for pull-up scl
+	 assign sda=sda_q? 1'bz:0; //bidirectional logic for pull-up scl
+	 assign sda_in=sda;
+	 */
+	 
+	 //sccb output logic
+	 wire temp;
+	 assign scl=scl_q; //sccb scl does not need pull-up
+	 assign temp=(state_q==read || state_q==ack_servant);
+	 //assign sda=(state_q==read || state_q==ack_servant)? 1'bz : sda_q; //sccb sda does not need pull-up
+	 //assign sda_in=sda;
+	 
+	 TRELLIS_IO #(.DIR("BIDIR")) tristate
+	 (
+	  .B(sda),
+	  .I(sda_q),
+	  .T(temp),
+	  .O(sda_in)
+	 );
+	 
+	 assign scl_hi= scl_q==1'b1 && counter_q==half && scl==1'b1; //scl is on the middle of a high(1) bit
+	 assign scl_lo= scl_q==1'b0 && counter_q==half; //scl is on the middle of a low(0) bit
+	 assign rd_data=rd_data_q;
+	 assign state=state_q;
+
+endmodule
+
+/*
+my_hdmi_device 
+
+Copyright (C) 2021  Hirosh Dabui <hirosh@dabui.de>
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+*/
+`timescale 1ns / 1ps
+
+module my_vga_clk_generator (
+           input pclk, 
+           output out_hsync, 
+           output out_vsync,
+           output out_blank,
+           output reg [10:0] out_hcnt, /* 0..2043 */
+           output reg [10:0] out_vcnt, /* 0..2043 */
+           input reset_n
+       );
+//////////////CONFIGURE///////////////
+localparam
+	/* VGA_1280x720@60Hz */          
+		 VPOL            = 1,	      
+		 HPOL            = 0,	      
+		 FRAME_RATE      = 30,	    
+	/* vertical timing frame */     
+		 VBP             = 33,      
+		 VFP             = 10,      
+		 VSLEN           = 2,	      
+		 VACTIVE         = 480,	    
+	/* horizontal timing frame */   
+		 HBP             = 48,	    
+		 HFP             = 16,	    
+		 HSLEN           = 96,	    
+		 HACTIVE         = 640;
+//////////////////////////////////////
+
+localparam VTOTAL            = VACTIVE + VFP + VSLEN + VBP;	
+localparam HTOTAL            = HACTIVE + HFP + HSLEN + HBP;	
+localparam PIXEL_CLK         = (VTOTAL * HTOTAL) * FRAME_RATE;
+
+	//Display Final Values 
+	initial begin 
+	  $display("VACTIVE:%d", VACTIVE); 
+	  $display("HACTIVE:%d", HACTIVE); 
+	  $display("VBP:%d", VBP);
+	  $display("VFP:%d", VFP); 
+	  $display("HBP:%d", HBP); 
+	  $display("HFP:%d", HFP); 
+	  $display("VSLEN:%d", VSLEN); 
+	  $display("HSLEN:%d", HSLEN); 
+	  $display("VTOTAL:%d", VTOTAL); 
+	  $display("HTOTAL:%d", HTOTAL); 
+	  $display("Framerate:%d", FRAME_RATE); 
+	  $display("PIXEL Frequency:%d", PIXEL_CLK); 
+	end 
+	
+    /*
+     *
+     *         +
+     *         |
+     *         | VACTIVE
+     *         |
+     *         |       HACTIVE            HFP    HSLEN    HBP
+     *         ------------------------++-----++-------+------+
+     *         |
+     *         |
+     *         |
+     *         |
+     *         |
+     *         +
+     *         | VFP
+     *         +
+     *         +
+     *         |
+     *         | VSLEN
+     *         |
+     *         +
+     *         +
+     *         |
+     *         | HBP
+     *         |
+     *         +
+     *
+     */
+
+
+
+assign out_vsync = ((out_vcnt >= (VACTIVE + VFP -1)) && (out_vcnt < (VACTIVE + VFP + VSLEN))) ^ ~VPOL;
+assign out_hsync = ((out_hcnt >= (HACTIVE + HFP -1)) && (out_hcnt < (HACTIVE + HFP + HSLEN))) ^ ~HPOL;
+assign out_blank = (out_hcnt >= HACTIVE) || (out_vcnt >= VACTIVE);
+
+wire hcycle = out_hcnt == (HTOTAL -1) || ~reset_n;
+wire vcycle = out_vcnt == (VTOTAL -1) || ~reset_n;
+
+always @(posedge pclk) out_hcnt <= hcycle ? 0 : out_hcnt + 1;
+
+always @(posedge pclk) begin
+    if (hcycle) out_vcnt <= vcycle ? 0 : out_vcnt + 1;
+end
+
+endmodule
+// diamond 3.7 accepts this PLL
+// diamond 3.8-3.9 is untested
+// diamond 3.10 or higher is likely to abort with error about unable to use feedback signal
+// cause of this could be from wrong CPHASE/FPHASE parameters
+module pll_HDMI
+(
+    input clkin, // 25 MHz, 0 deg
+    output clkout0, // 125 MHz, 0 deg
+    output clkout1, // 25 MHz, 0 deg
+    output locked
+);
+(* FREQUENCY_PIN_CLKI="25" *)
+(* FREQUENCY_PIN_CLKOP="125" *)
+(* FREQUENCY_PIN_CLKOS="25" *)
+(* ICP_CURRENT="12" *) (* LPF_RESISTOR="8" *) (* MFG_ENABLE_FILTEROPAMP="1" *) (* MFG_GMCREF_SEL="2" *)
+EHXPLLL #(
+        .PLLRST_ENA("DISABLED"),
+        .INTFB_WAKE("DISABLED"),
+        .STDBY_ENABLE("DISABLED"),
+        .DPHASE_SOURCE("DISABLED"),
+        .OUTDIVIDER_MUXA("DIVA"),
+        .OUTDIVIDER_MUXB("DIVB"),
+        .OUTDIVIDER_MUXC("DIVC"),
+        .OUTDIVIDER_MUXD("DIVD"),
+        .CLKI_DIV(1),
+        .CLKOP_ENABLE("ENABLED"),
+        .CLKOP_DIV(5),
+        .CLKOP_CPHASE(2),
+        .CLKOP_FPHASE(0),
+        .CLKOS_ENABLE("ENABLED"),
+        .CLKOS_DIV(25),
+        .CLKOS_CPHASE(2),
+        .CLKOS_FPHASE(0),
+        .FEEDBK_PATH("CLKOP"),
+        .CLKFB_DIV(5)
+    ) pll_i (
+        .RST(1'b0),
+        .STDBY(1'b0),
+        .CLKI(clkin),
+        .CLKOP(clkout0),
+        .CLKOS(clkout1),
+        .CLKFB(clkout0),
+        .CLKINTFB(),
+        .PHASESEL0(1'b0),
+        .PHASESEL1(1'b0),
+        .PHASEDIR(1'b1),
+        .PHASESTEP(1'b1),
+        .PHASELOADREG(1'b1),
+        .PLLWAKESYNC(1'b0),
+        .ENCLKOP(1'b0),
+        .LOCK(locked)
+	);
+endmodule
+
+// diamond 3.7 accepts this PLL
+// diamond 3.8-3.9 is untested
+// diamond 3.10 or higher is likely to abort with error about unable to use feedback signal
+// cause of this could be from wrong CPHASE/FPHASE parameters
+module pll_SDRAM
+(
+    input clkin, // 25 MHz, 0 deg
+    output clkout0, // 142.857 MHz, 0 deg
+    output locked
+);
+(* FREQUENCY_PIN_CLKI="25" *)
+(* FREQUENCY_PIN_CLKOP="142.857" *)
+(* ICP_CURRENT="12" *) (* LPF_RESISTOR="8" *) (* MFG_ENABLE_FILTEROPAMP="1" *) (* MFG_GMCREF_SEL="2" *)
+EHXPLLL #(
+        .PLLRST_ENA("DISABLED"),
+        .INTFB_WAKE("DISABLED"),
+        .STDBY_ENABLE("DISABLED"),
+        .DPHASE_SOURCE("DISABLED"),
+        .OUTDIVIDER_MUXA("DIVA"),
+        .OUTDIVIDER_MUXB("DIVB"),
+        .OUTDIVIDER_MUXC("DIVC"),
+        .OUTDIVIDER_MUXD("DIVD"),
+        .CLKI_DIV(7),
+        .CLKOP_ENABLE("ENABLED"),
+        .CLKOP_DIV(4),
+        .CLKOP_CPHASE(1),
+        .CLKOP_FPHASE(0),
+        .FEEDBK_PATH("CLKOP"),
+        .CLKFB_DIV(40)
+    ) pll_i (
+        .RST(1'b0),
+        .STDBY(1'b0),
+        .CLKI(clkin),
+        .CLKOP(clkout0),
+        .CLKFB(clkout0),
+        .CLKINTFB(),
+        .PHASESEL0(1'b0),
+        .PHASESEL1(1'b0),
+        .PHASEDIR(1'b1),
+        .PHASESTEP(1'b1),
+        .PHASELOADREG(1'b1),
+        .PLLWAKESYNC(1'b0),
+        .ENCLKOP(1'b0),
+        .LOCK(locked)
+	);
+endmodule
+// diamond 3.7 accepts this PLL
+// diamond 3.8-3.9 is untested
+// diamond 3.10 or higher is likely to abort with error about unable to use feedback signal
+// cause of this could be from wrong CPHASE/FPHASE parameters
+module pll_SOBEL
+(
+    input clkin, // 25 MHz, 0 deg
+    output clkout0, // 50 MHz, 0 deg
+    output locked
+);
+(* FREQUENCY_PIN_CLKI="25" *)
+(* FREQUENCY_PIN_CLKOP="50" *)
+(* ICP_CURRENT="12" *) (* LPF_RESISTOR="8" *) (* MFG_ENABLE_FILTEROPAMP="1" *) (* MFG_GMCREF_SEL="2" *)
+EHXPLLL #(
+        .PLLRST_ENA("DISABLED"),
+        .INTFB_WAKE("DISABLED"),
+        .STDBY_ENABLE("DISABLED"),
+        .DPHASE_SOURCE("DISABLED"),
+        .OUTDIVIDER_MUXA("DIVA"),
+        .OUTDIVIDER_MUXB("DIVB"),
+        .OUTDIVIDER_MUXC("DIVC"),
+        .OUTDIVIDER_MUXD("DIVD"),
+        .CLKI_DIV(1),
+        .CLKOP_ENABLE("ENABLED"),
+        .CLKOP_DIV(12),
+        .CLKOP_CPHASE(5),
+        .CLKOP_FPHASE(0),
+        .FEEDBK_PATH("CLKOP"),
+        .CLKFB_DIV(2)
+    ) pll_i (
+        .RST(1'b0),
+        .STDBY(1'b0),
+        .CLKI(clkin),
+        .CLKOP(clkout0),
+        .CLKFB(clkout0),
+        .CLKINTFB(),
+        .PHASESEL0(1'b0),
+        .PHASESEL1(1'b0),
+        .PHASEDIR(1'b1),
+        .PHASESTEP(1'b1),
+        .PHASELOADREG(1'b1),
+        .PLLWAKESYNC(1'b0),
+        .ENCLKOP(1'b0),
+        .LOCK(locked)
+	);
+endmodule
+`timescale 1ns / 1ps
+
+module sdram_controller(
+	//fpga to controller
+	input clk,rst_n,  //clk=143MHz
+	input rw, // 1:read , 0:write
+	input rw_en, //must be asserted before read/write
+	input[14:0] f_addr, //14:2=row(13)  , 1:0=bank(2) , no need for column address since full page mode will always start from zero and end with 512 words
+	input [15:0] f2s_data, //fpga-to-sdram data , write data burst will start at assertion of f2s_data_valid
+	output[15:0] s2f_data, //sdram to fpga data
+	output s2f_data_valid, //asserts while  burst-reading(data is available at output UNTIL the next rising edge)
+	output reg f2s_data_valid, //asserts while burst-writing(data must be available at input BEFORE the next rising edge)
+	output reg ready, //"1" if sdram is available for nxt read/write operation
+	
+	//controller to sdram
+	output s_clk,
+	output s_cke, //always high for almost all operations(except for self-refresh w/c I did not use here)
+	output s_cs_n, s_ras_n, s_cas_n, s_we_n, //commands
+	output[12:0] s_addr, //row/colum address bus
+	output[1:0] s_ba, //bank address bus
+	output LDQM , HDQM, //low-byte and high-byte mask (always zero:disabled)
+	inout[15:0] s_dq //sdram inout/output data	
+    );	
+	 
+	 /*
+	 sdram_controller m1(
+		//fpga to controller
+		.clk(CLK_OUT), //clk=143MHz
+		.rst_n(rst_n),  
+		.rw(rw), // 1:read , 0:write
+		.rw_en(rw_en), //must be asserted before read/write
+		.f_addr(f_addr_q), //14:2=row(13)  , 1:0=bank(2) , no need for column address since full page mode will always start from zero and end with 512 words
+		.f2s_data(f2s_data_q), //fpga-to-sdram data , write data burst will start at assertion of f2s_data_valid
+		.s2f_data(s2f_data), //sdram to fpga data
+		.s2f_data_valid(s2f_data_valid),  //asserts while  burst-reading(data is available at output UNTIL the next rising edge)
+		.f2s_data_valid(f2s_data_valid), //asserts while burst-writing(data must be available at input BEFORE the next rising edge)
+		.ready(ready), //"1" if sdram is available for nxt read/write operation
+		//controller to sdram
+		.s_clk(sdram_clk),
+		.s_cke(sdram_cke), 
+		.s_cs_n(sdram_cs_n),
+		.s_ras_n(sdram_ras_n ), 
+		.s_cas_n(sdram_cas_n),
+		.s_we_n(sdram_we_n), 
+		.s_addr(sdram_addr), 
+		.s_ba(sdram_ba), 
+		.LDQM(sdram_dqm[0]),
+		.HDQM(sdram_dqm[1]),
+		.s_dq(sdram_dq) 
+    );
+		What to Change for new SDRAM Device:
+			. Time Specs
+			. Commands
+			. refresh_ctr_q time for refresh
+			. Power-up delay
+			. Load Mode Register
+	 */
+	 
+	 //s_clock(clk input to sdram) is 180 degrees lagging from main clock to solve the hold-setup time requirements of sdram
+	 ODDRX1F oddr_primitive
+	 (
+		.D0(1'b0), //1'b0
+		.D1(1'b1), //1'b1
+		.SCLK(clk),
+		.Q(s_clk)
+	);
+	//FSM states		//initialize
+	 localparam[3:0]  start=0,
+							precharge_init=1, 
+							refresh_1=2,
+							refresh_2=3,
+							load_mode_reg=4,
+							//normal operation
+							idle=5,
+							read=6,
+							read_data=7,
+							write=8,
+							write_burst=9,
+							//refresh every 7.81us
+							refresh=10,
+		
+							delay=11; //waiting state for any amount of delay needed
+							
+	//minimum time specs needed(in clks for 143MHz(7ns))
+	localparam[3:0] t_RP=2, //15ns(precharge) 
+					t_RC=9, //60ns(active to active,ref to ref) ///////////////
+					t_MRD=2, //2 clk,(mode register) /2/
+					t_RCD=2, //15ns (active to read/write)      ////////////
+					t_WR=2, //2clk delay after writing before manual/auto precharge can start
+					t_CL=3; //CAS latency(delay of data_out after read command)
+					
+	//commands {cs_n,ras_n,cas_n,we_n} REFER TO THE DATASHEET: winbond W9825G6KH
+	localparam[3:0]  cmd_precharge=4'b0010,
+						  cmd_NOP=4'b0111,
+						  cmd_activate=4'b0011,
+						  cmd_write=4'b0100,
+						  cmd_read=4'b0101,
+						  cmd_setmode=4'b0000,
+						  cmd_refresh=4'b0001;
+						  
+	reg[3:0] state_q,state_d; //_q is registered output, _d is input to DFF
+	reg[3:0] nxt_q,nxt_d; //state after next state
+	reg[3:0] cmd_q,cmd_d; //{cs_n,ras_n,cas_n,we_n}
+	reg[15:0] delay_ctr_q,delay_ctr_d; //stores delay needed(max is 200us for the initialization sequence)
+	reg[10:0] refresh_ctr_q=0,refresh_ctr_d; 
+	reg refresh_flag_q,refresh_flag_d;
+	reg[9:0] burst_index_q=0,burst_index_d; //stores the data left to be burst(512 for full page burst)
+	reg rw_d,rw_q,rw_en_q,rw_en_d;
+	
+	//buffer for output for a glitch-free signal
+	reg[12:0] s_addr_q,s_addr_d;
+	reg[1:0] s_ba_q,s_ba_d;
+	reg[15:0] s_dq_q,s_dq_d;
+	reg tri_q,tri_d;
+	
+	//buffer for input
+	reg[14:0] f_addr_q,f_addr_d;
+	reg[15:0] f2s_data_q,f2s_data_d;
+	reg[15:0] s2f_data_q,s2f_data_d;
+	reg s2f_data_valid_q,s2f_data_valid_d;
+
+	wire[15:0] s_dq_in;
+	
+	
+	//register operation
+	always @(posedge clk,negedge rst_n) begin
+		if(!rst_n) begin
+			state_q<=start;
+			nxt_q<=start;
+			cmd_q<=cmd_NOP;
+			delay_ctr_q<=0;
+			refresh_ctr_q<=0;
+			s_addr_q<=0;
+			tri_q<=0;
+			rw_q<=0;
+			rw_en_q<=0;
+			
+			s_ba_q<=0;
+			s_dq_q<=0;
+			f_addr_q<=0;
+			rw_q<=0;
+			f2s_data_q<=0;
+			s2f_data_q<=0;
+			s2f_data_valid_q<=0;
+			rw_q<=0;
+			refresh_flag_q<=0;
+			burst_index_q<=0;
+		end
+		else begin
+			state_q<=state_d;
+			nxt_q<=nxt_d;
+			cmd_q<=cmd_d;
+			delay_ctr_q<=delay_ctr_d;
+			refresh_ctr_q<=refresh_ctr_d;
+			s_addr_q<=s_addr_d;
+			tri_q<=tri_d;
+			refresh_flag_q<=refresh_flag_d;
+			burst_index_q<=burst_index_d;
+			
+			s_ba_q<=s_ba_d;
+			s_dq_q<=s_dq_d;
+			f_addr_q<=f_addr_d;
+			rw_q<=rw_d;
+			f2s_data_q<=f2s_data_d;
+			s2f_data_q<=s2f_data_d;
+			s2f_data_valid_q<=s2f_data_valid_d;
+			rw_q<=rw_d;
+			rw_en_q<=rw_en_d;
+		end
+	end
+	
+
+	//next-state logics
+	always @* begin
+		state_d=state_q;
+		nxt_d=nxt_q;
+		cmd_d=cmd_NOP; //always default to No Operation 
+		delay_ctr_d=delay_ctr_q;
+		ready=0; 
+		s_addr_d=s_addr_q;
+		s_ba_d=s_ba_q;
+		s_dq_d=s_dq_q;
+		f_addr_d=f_addr_q;
+		rw_d=rw_q;
+		f2s_data_d=f2s_data_q;
+		s2f_data_d=s2f_data_q;
+		tri_d=0;  
+		s2f_data_valid_d=1'b0;
+		f2s_data_valid=1'b0;
+		burst_index_d=burst_index_q;
+		rw_d=rw_q;
+		rw_en_d=rw_en_q;
+		
+		//refresh every 7.8us or else data will be lost. 
+		refresh_flag_d=refresh_flag_q;
+		refresh_ctr_d=refresh_ctr_q+1'b1;
+		if(refresh_ctr_q==1070) begin //7.7 us
+			refresh_ctr_d=0;
+			refresh_flag_d=1;
+		end
+		
+		
+		
+		case(state_q)
+					////////////////BEGIN:INITIALIZE////////////////
+			delay: begin //wait here for a delay specified by delay_ctr_q(parameter in time specs)
+						delay_ctr_d=delay_ctr_q-1'b1;
+						if(delay_ctr_d==0) state_d=nxt_q;	
+						if(nxt_q==write) tri_d=1;
+					 end
+			start: begin //initiliaze after power-up
+						state_d=delay;
+						nxt_d=precharge_init;
+						delay_ctr_d=16'd30_000; //wait for 200us
+						s_addr_d=0;
+						s_ba_d=0;
+					 end
+precharge_init: begin //precharge ALL banks (A10 must be high)
+						state_d=delay;
+						nxt_d=refresh_1;
+						delay_ctr_d=t_RP-1;
+						cmd_d=cmd_precharge;
+						s_addr_d[10]=1'b1;
+					 end
+		refresh_1: begin
+						state_d=delay;
+						nxt_d=refresh_2;
+						delay_ctr_d=t_RC-1;
+						cmd_d=cmd_refresh;
+					  end
+		refresh_2: begin
+						state_d=delay;
+						nxt_d=load_mode_reg;
+						delay_ctr_d=t_RC-1;
+						cmd_d=cmd_refresh;
+					  end
+  load_mode_reg: begin
+						state_d=delay;
+						nxt_d=idle;
+						delay_ctr_d=t_MRD-1;
+						cmd_d=cmd_setmode;
+						s_addr_d=13'b 000_0_00_011_0_111; //{reserved,writemode,reserved,CL,AddressingMode,BurstLength}
+						s_ba_d=2'b00; //reserved
+					  end
+					 ////////////////END:INITIALIZE////////////////
+					
+					////////////////BEGIN:NORMAL OPERATION////////////////
+		     idle: begin 
+						ready=rw_en_q? 0:1;
+						if(rw_en_q) begin //permission granted for r/w operation 
+								state_d=delay;
+								cmd_d=cmd_activate;
+								delay_ctr_d=t_RCD-1;
+								nxt_d=rw_q?read:write;
+								burst_index_d=0;
+								rw_en_d=1'b0;
+								{s_addr_d,s_ba_d}=f_addr_q;//row + bank addr
+						end
+						else if(refresh_flag_q || rw_en) begin  //refresh every 7.7us and BEFORE start of burst read/write operations
+							state_d=delay;
+							nxt_d=refresh;
+							delay_ctr_d=t_RP-1;
+							cmd_d=cmd_precharge; //precharge all banks first before auto-refresh
+							s_addr_d[10]=1'b1;
+							refresh_flag_d=0;
+							if(rw_en) begin 
+								rw_en_d=rw_en;
+								f_addr_d=f_addr; 
+								rw_d=rw;
+							end
+						end
+						
+					  end 
+	     refresh:	begin
+						 state_d=delay;
+						 nxt_d=idle;
+						 delay_ctr_d=t_RC-1;
+						 cmd_d=cmd_refresh;
+						end					 
+			read: begin 
+						state_d=delay;
+						delay_ctr_d=t_CL; //(WHYYY???)not subtracted by one since the sdram is "late" by half a cycle so register is one clk after the expected clock latency delay
+						cmd_d=cmd_read;
+						s_addr_d=0;//what column to activate(in full page mode, column starts at LEFTMOST which is zero)
+						s_ba_d=f_addr_q[1:0]; //what bank to activate
+						s_addr_d[10]=1'b0; //no auto-precharge for full page burst
+						nxt_d=read_data;
+					end
+	 read_data: begin //read data after CAS latency of 3 clk
+						s2f_data_d=s_dq_in;
+						s2f_data_valid_d=1'b1;
+						burst_index_d=burst_index_q+1;
+						if(burst_index_q==512) begin //if all 512 burst data is already finished, precharge then go back to idle
+							s2f_data_valid_d=1'b0;
+							state_d=delay;
+							nxt_d=idle;
+							delay_ctr_d=t_RP-1;
+							cmd_d=cmd_precharge;
+						end
+					end		
+		 write: begin  
+						f2s_data_d=f2s_data; //write data
+						f2s_data_valid=1'b1;
+						s_addr_d=0; //what column to activate(in full page mode, column starts at LEFTMOST which is zero)
+						s_ba_d=f_addr_q[1:0];
+						s_addr_d[10]=1'b0; //no auto-precharge for full page burst
+						tri_d=1'b1; //tristate buffer on since we output/write signals
+						cmd_d=cmd_write;
+						state_d=write_burst;
+						burst_index_d=burst_index_q+1;
+				   end
+  write_burst: begin    //write data burst will start at assertion of f2s_data_valid
+						f2s_data_d=f2s_data; //write data
+						f2s_data_valid=1'b1; 
+						tri_d=1'b1; //tristate buffer on since we output/write signals
+						burst_index_d=burst_index_q+1;
+						
+						if(burst_index_q==512) begin //if all 512 burst data is already finished, precharge then go back to idle
+							tri_d=0;
+							state_d=delay;
+							f2s_data_valid=1'b0;
+							nxt_d=idle;
+							delay_ctr_d=t_RP+t_WR-1;
+							cmd_d=cmd_precharge;
+						end
+					end
+				  ////////////////END:NORMAL OPERATION////////////////
+				  
+		default: state_d=start;
+		endcase
+		
+		
+			
+	
+	end
+	
+	//assign the outputs to corresponding buffers
+	assign s_cs_n=cmd_q[3],
+			 s_ras_n=cmd_q[2],
+			 s_cas_n=cmd_q[1],
+			 s_we_n=cmd_q[0];
+	assign s_cke=1'b1; 
+	assign LDQM=1'b0, 
+			 HDQM=1'b0;
+	assign s_addr=s_addr_q;
+	assign s_ba=s_ba_q;
+    //assign s_dq=tri_q? f2s_data_q:16'hzzzz; //tri-state output,tri=1 for write , tri=0 for read(hi-Z)
+    //assign s_dq_in=s_dq;
+	assign s2f_data=s2f_data_q;
+	assign s2f_data_valid=s2f_data_valid_q;
+	
+	
+	genvar i;
+	generate
+		for(i=0;i<16;i=i+1) begin
+			TRELLIS_IO #(.DIR("BIDIR")) u0
+			 (
+			  .B(s_dq[i]),
+			  .I(f2s_data_q[i]),
+			  .T({!tri_q}),
+			  .O(s_dq_in[i])
+			 );
+		end
+	endgenerate
+
+					
+	
+endmodule
+
+`timescale 1ns / 1ps
+
+module sdram_interface(
+	input clk,rst_n, //clk is 143MHz(SDRAM)
+	//fifo for camera
+	input wire clk_vga, rd_en,
+	input wire sobel,
+	input wire[9:0] data_count_camera_fifo, //number of data in camera fifo
+	input wire[16:0] din, //data from camera fifo
+	output wire rd_camera, //read camera fifo
+	//sobel
+	input wire[8:0] sobel_data,
+	input wire[9:0] data_count_r,
+	output wire rd_sobel,
+	//fifo for vga
+	output wire empty_fifo, 
+	output wire[15:0] dout,
+	//controller to sdram
+	output wire sdram_clk,
+	output wire sdram_cke,  
+	output wire sdram_cs_n, sdram_ras_n, sdram_cas_n, sdram_we_n, 
+	output wire[12:0] sdram_addr,
+	output wire[1:0] sdram_ba, 
+	output wire[1:0] sdram_dqm, 
+	inout[15:0] sdram_dq
+    );
+	 //FSM state declarations
+	 localparam idle=0,
+					burst_op=1;
+					
+	 reg state_q=0,state_d;	 
+	 reg[10:0] colored_addr_q=0,colored_addr_d,sobel_addr_q=0,sobel_addr_d;
+	 reg[10:0] rd_addr_q=0,rd_addr_d;
+	 reg rw,rw_en;
+	 reg orig_q=0,orig_d;
+	 reg[11:0] f_addr;
+	 wire[15:0] s2f_data;
+	 wire s2f_data_valid,f2s_data_valid;
+	 wire ready;
+	 wire[9:0] data_count_w;
+	 reg[15:0] f2s_data;
+	 
+	 
+	 //register operation
+	 always @(posedge clk,negedge rst_n) begin
+		if(!rst_n) begin
+			state_q<=0;
+			colored_addr_q<=0;
+			rd_addr_q<=0;
+			orig_q<=0;
+			sobel_addr_q<=0;
+		end
+		else begin
+			state_q<=state_d;
+			colored_addr_q<=colored_addr_d;
+			rd_addr_q<=rd_addr_d;
+			orig_q<=orig_d;
+			sobel_addr_q<=sobel_addr_d;
+		end
+	 end
+	 
+	 //FSM next-state declarations
+	 always @* begin
+		state_d=state_q;
+		colored_addr_d=colored_addr_q;
+		rd_addr_d=rd_addr_q;
+		sobel_addr_d=sobel_addr_q;
+		f_addr=0;
+		rw=0;
+		rw_en=0;
+		orig_d=orig_q;
+		
+		case(state_q)
+			    idle: if(data_count_camera_fifo>512 && ready) begin //wait for the first 512 pixel-data to fill the asyn_fifo then burst-write it to sdram
+							rw_en=1;
+							rw=0;
+							sobel_addr_d=600;
+							colored_addr_d=1;
+							f_addr=colored_addr_q;
+							state_d=burst_op;
+							orig_d=1;
+						 end
+			burst_op: if(ready) begin //choose whether to read the colored image or edge detected image OR write to the fifo of VGA
+								if(data_count_camera_fifo>512) begin //colored image container is filled to 512 thus we can now burst-write(full-page has 512 data) it to SDRAM 
+									rw_en=1;
+									rw=0;
+									colored_addr_d=(colored_addr_q==599)? 0:colored_addr_q+1'b1; //One frame(640x480) fills the addresses 0-to-599
+									f_addr=colored_addr_q;
+									orig_d=1;
+								end
+								
+								else if(data_count_w<250) begin //asyn_fifo of VGA has only 250 pixel data left, we will now fill it by another 512 pixel data via burst reading the sdram
+									rw_en=1;
+									rw=1;
+									rd_addr_d=(rd_addr_q==599)? 0:rd_addr_q+1'b1;
+									f_addr= sobel? (rd_addr_q+600):rd_addr_q;
+								end
+								else if(data_count_r>512) begin //burst write the edge detected image to SDRAM
+									rw_en=1;
+									rw=0;
+									sobel_addr_d=(sobel_addr_q==1199)? 600:sobel_addr_q+1'b1;
+									f_addr=sobel_addr_q;
+									orig_d=0;
+								end
+						 end
+			 default: state_d=burst_op; //state_d=idle;
+		endcase
+		f2s_data= orig_d? (din[16]? 16'b00000_000000_11111:din[15:0]): {7'b000_0000,sobel_data}; 
+							//used as placeholder for first pixel for RGB
+		//debug
+		/*if(colored_addr_q<75) f2s_data={{5{1'b0}},{6{1'b0}},{5{1'b0}}};
+		else if(colored_addr_q<150) f2s_data={{5{1'b0}},{6{1'b0}},{5{1'b1}}};
+		else if(colored_addr_q<225) f2s_data={{5{1'b0}},{6{1'b1}},{5{1'b0}}};
+		else if(colored_addr_q<300) f2s_data={{5{1'b0}},{6{1'b1}},{5{1'b1}}};
+		else if(colored_addr_q<375) f2s_data={{5{1'b1}},{6{1'b0}},{5{1'b0}}};
+		else if(colored_addr_q<450) f2s_data={{5{1'b1}},{6{1'b0}},{5{1'b1}}};
+		else if(colored_addr_q<525) f2s_data={{5{1'b1}},{6{1'b1}},{5{1'b0}}};
+		else if(colored_addr_q<600) f2s_data={{5{1'b1}},{6{1'b1}},{5{1'b1}}};*/
+	 end
+	 
+ 
+	 assign rd_camera= f2s_data_valid && orig_d;
+	 assign rd_sobel= f2s_data_valid && !orig_d;
+	 
+	 //module instantiations
+	 sdram_controller m0(
+		//fpga to controller
+		.clk(clk), //clk=143MHz
+		.rst_n(rst_n),  
+		.rw(rw), // 1:read , 0:write
+		.rw_en(rw_en), //must be asserted before read/write
+		.f_addr(f_addr), //14:2=row(13)  , 1:0=bank(2) , no need for column address since full page mode will always start from zero and end with 511 words
+		.f2s_data(f2s_data), //fpga-to-sdram data
+		.s2f_data(s2f_data), //sdram to fpga data
+		.s2f_data_valid(s2f_data_valid),  //asserts while  burst-reading(data is available at output UNTIL the next rising edge)
+		.f2s_data_valid(f2s_data_valid), //asserts while burst-writing(data must be available at input BEFORE the next rising edge)
+		.ready(ready), //"1" if sdram is available for nxt read/write operation
+		//controller to sdram
+		.s_clk(sdram_clk),
+		.s_cke(sdram_cke), 
+		.s_cs_n(sdram_cs_n),
+		.s_ras_n(sdram_ras_n ), 
+		.s_cas_n(sdram_cas_n),
+		.s_we_n(sdram_we_n), 
+		.s_addr(sdram_addr), 
+		.s_ba(sdram_ba), 
+		.LDQM(sdram_dqm[0]),
+		.HDQM(sdram_dqm[1]),
+		.s_dq(sdram_dq)
+		); 
+	
+	asyn_fifo #(.DATA_WIDTH(16),.FIFO_DEPTH_WIDTH(10)) m2 //1024x16 FIFO mem ,FIFO_DEOPTH=10
+	(
+		.rst_n(rst_n),
+		.clk_write(clk),
+		.clk_read(clk_vga),
+		.write(s2f_data_valid),
+		.read(rd_en), 
+		.data_write(s2f_data), //input FROM write clock domain
+		.data_read(dout), //output TO read clock domain
+		.full(),
+		.empty(empty_fifo), //full=sync to write domain clk , empty=sync to read domain clk
+		.data_count_w(data_count_w) 
+    );
+	
+endmodule
+/*
+my_hdmi_device 
+
+Copyright (C) 2021  Hirosh Dabui <hirosh@dabui.de>
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+*/
+/*
+ * tmds_encode implementation (c) 2020 Hirosh Dabui <hirosh@dabui.de>
+ * based on Digital Visual Interface Revision 1.0, Page 29
+ */
+module tmds_encoder(
+           input clk,
+           input DE, 
+           input [7:0]D,
+           input C1,
+           input C0,
+           output reg[9:0] q_out = 0
+       );
+parameter LEGACY_DVI_CONTROL_LUT = 0;
+
+function [3:0] N0;
+    input [7:0] d;
+    integer i;
+    begin
+        N0 = 0;
+        for (i = 0; i < 8; i=i+1)
+            N0 = N0 + !d[i];
+    end
+endfunction
+
+function [3:0] N1;
+    input [7:0] d;
+    integer i;
+    begin
+        N1 = 0;
+        for (i = 0; i < 8; i=i+1)
+            N1 = N1 + d[i];
+    end
+endfunction
+
+reg signed [7:0] cnt_prev = 0;
+reg signed [7:0] cnt = 0;
+
+reg [8:0] q_m;
+
+always @(*) begin
+
+    if ( (N1(D) > 4) | (N1(D) == 4) & (D[0] == 0) ) begin
+
+        q_m[0] =           D[0];
+        q_m[1] = q_m[0] ~^ D[1];
+        q_m[2] = q_m[1] ~^ D[2];
+        q_m[3] = q_m[2] ~^ D[3];
+        q_m[4] = q_m[3] ~^ D[4];
+        q_m[5] = q_m[4] ~^ D[5];
+        q_m[6] = q_m[5] ~^ D[6];
+        q_m[7] = q_m[6] ~^ D[7];
+        q_m[8] = 1'b0;
+
+    end else begin
+
+        q_m[0] =          D[0];
+        q_m[1] = q_m[0] ^ D[1];
+        q_m[2] = q_m[1] ^ D[2];
+        q_m[3] = q_m[2] ^ D[3];
+        q_m[4] = q_m[3] ^ D[4];
+        q_m[5] = q_m[4] ^ D[5];
+        q_m[6] = q_m[5] ^ D[6];
+        q_m[7] = q_m[6] ^ D[7];
+        q_m[8] = 1'b1;
+
+    end /* (N1(D) > 4) | (N1(D) == 4) & (D[0] == 0) */
+
+end
+
+always @(posedge clk) begin
+
+    if (DE) begin
+
+        if ((cnt_prev == 0) | (N1(q_m[7:0]) == N0(q_m[7:0]))) begin
+
+            q_out[9]   <= ~q_m[8];
+            q_out[8]   <=  q_m[8];
+            q_out[7:0] <= q_m[8] ? q_m[7:0] : ~q_m[7:0];
+
+            if (q_m[8] == 0) begin
+                cnt = cnt_prev + (N0(q_m[7:0]) - N1(q_m[7:0]));
+            end else begin
+                cnt = cnt_prev + (N1(q_m[7:0]) - N0(q_m[7:0]));
+            end /*q_m[8] == 0*/
+
+        end else begin
+
+            if ( (cnt_prev > 0 & (N1(q_m[7:0]) > N0(q_m[7:0]))) |
+                    (cnt_prev < 0 & (N0(q_m[7:0]) > N1(q_m[7:0]))) ) begin
+                q_out[9] <= 1;
+                q_out[8] <= q_m[8];
+                q_out[7:0] <= ~q_m[7:0];
+                cnt = cnt_prev + 2*q_m[8] + (N0(q_m[7:0]) - N1(q_m[7:0]));
+            end else begin
+                q_out[9] <= 0;
+                q_out[8] <= q_m[8];
+                q_out[7:0] <= q_m[7:0];
+                cnt = cnt_prev + 2*(~q_m[8]) + (N1(q_m[7:0]) - N0(q_m[7:0]));
+            end /*
+                (cnt_prev > 0 & N1(q_m[7:0]) > N0(q_m[7:0]))) |
+                (cnt_prev < 0 & N0(q_m[7:0]) > N1(q_m[7:0])))
+              */
+
+        end /* ((cnt_prev == 0) | (N1(q_m[7:0]) == N0(q_m[7:0]))) */
+
+    end else begin
+        /* !DE */
+        cnt = 0;
+        /* hsync -> c0 | vsync -> c1 */
+        case ({C1, C0})
+`ifdef LEGACY_DVI_CONTROL_LUT
+            /* dvi control data lut */
+            2'b00: q_out <= 10'b00101_01011;
+            2'b01: q_out <= 10'b11010_10100;
+            2'b10: q_out <= 10'b00101_01010;
+            2'b11: q_out <= 10'b11010_10101;
+`else
+            /* hdmi control data period */
+            2'b00: q_out <= 10'b1101010100;
+            2'b01: q_out <= 10'b0010101011;
+            2'b10: q_out <= 10'b0101010100;
+            2'b11: q_out <= 10'b1010101011;
+`endif
+        endcase
+
+    end /* DE */
+
+    cnt_prev <= cnt;
+
+end
+
+endmodule
+`timescale 1ns / 1ps
+
+   module top_module(
+	input wire clk,rst_n,
+	input wire[3:0] key, //key[1:0] for threshold contro , key[2] for switching display(RGB/Edge Detector) , key[3] to automatically align sobel frame(if misaligned)
+	//camera pinouts
+	input wire cmos_pclk,cmos_href,cmos_vsync,
+	input wire[7:0] cmos_db,
+	inout cmos_sda,cmos_scl, 
+	output wire cmos_rst_n, cmos_pwdn, cmos_xclk,
+	//Debugging
+	output[7:0] led, 
+	//controller to sdram
+	output wire sdram_clk,
+	output wire sdram_cke, 
+	output wire sdram_cs_n, sdram_ras_n, sdram_cas_n, sdram_we_n, 
+	output wire[12:0] sdram_addr,
+	output wire[1:0] sdram_ba, 
+	output wire[1:0] sdram_dqm, 
+	inout[15:0] sdram_dq,
+	//HDMI output
+	output [3:0] gpdi_dp
+    );
+	 
+	 wire f2s_data_valid;
+	 wire[10:0] data_count_r,data_count_r_sobel;
+	 wire[16:0] dout,din;
+	 wire clk_sdram;
+	 wire empty_fifo,empty;
+	 wire clk_vga,clk_sobel;
+	 wire state;
+	 wire rd_sobel;
+	 wire rd_en,rd_fifo;
+	 wire[8:0] sobel_data;
+	 wire[9:0] data_count_sobel;
+	 wire rd_en_sobel;
+	 wire[16:0] dout_sobel;
+	 reg[7:0] threshold=0;
+	 reg sobel=0;
+	 //register operation 
+	always @(posedge clk) begin
+		if(!rst_n) begin
+			threshold=0;
+			sobel<=0;
+		end
+		else begin
+			threshold=key1_tick? threshold+1:threshold;  //decrease sensitivity of sobel edge detection
+			threshold=key2_tick? threshold-1:threshold;	//increase sensitivity of sobel edge detection
+			sobel<=key3_tick? !sobel:sobel; //choose whether to display the raw videoe or the edge detected video
+		end
+	end
+	
+	
+	//module instantiations
+	camera_interface m0 //control logic for retrieving data from camera, storing data to asyn_fifo, and  sending data to sdram
+	(
+		.clk(clk),
+		.clk_100(clk_sdram),
+		.rst_n(rst_n),
+		.key(),
+		//sobel
+		.rd_en_sobel(rd_en_sobel),
+		.dout_sobel(dout_sobel),
+		.data_count_r_sobel(data_count_r_sobel),
+		//camera fifo IO
+		.rd_en(rd_fifo),
+		.data_count_r(data_count_r),
+		.dout(dout),
+		//camera pinouts
+		.cmos_pclk(cmos_pclk),
+		.cmos_href(cmos_href),
+		.cmos_vsync(cmos_vsync),
+		.cmos_db(cmos_db),
+		.cmos_sda(cmos_sda),
+		.cmos_scl(cmos_scl), 
+		.cmos_rst_n(cmos_rst_n),
+		.cmos_pwdn(cmos_pwdn),
+		.cmos_xclk(cmos_xclk),
+		//Debugging
+		.led(led) //lights up after successful SCCB transfer
+    );
+	 
+	 sdram_interface m1 //control logic for writing the pixel-data from camera to sdram and reading pixel-data from sdram to vga
+	 (
+		.clk(clk_sdram),
+		.rst_n(rst_n),
+		.clk_vga(clk_vga),
+		.rd_en(rd_en),
+		.sobel(sobel),
+		//fifo for camera
+		.data_count_camera_fifo(data_count_r),
+		.din(dout),
+		.rd_camera(rd_fifo),
+		//sobel
+		.sobel_data(sobel_data),
+		.data_count_r(data_count_sobel),
+		.rd_sobel(rd_sobel),
+		//fifo for vga
+		.empty_fifo(empty_fifo),
+		.dout(din),
+		//controller to sdram
+		.sdram_clk(sdram_clk),
+		.sdram_cke(sdram_cke), 
+		.sdram_cs_n(sdram_cs_n),
+		.sdram_ras_n(sdram_ras_n),
+		.sdram_cas_n(sdram_cas_n),
+		.sdram_we_n(sdram_we_n), 
+		.sdram_addr(sdram_addr),
+		.sdram_ba(sdram_ba), 
+		.sdram_dqm(sdram_dqm),
+		.sdram_dq(sdram_dq)
+    );
+	 
+	 vga_interface m2 //control logic for retrieving data from sdram, storing data to asyn_fifo, and sending data to vga
+	 (
+		.clk(clk),
+		.rst_n(rst_n),
+		.sobel(sobel),
+		.align_tick(key[3]),
+		//asyn_fifo IO
+		.empty_fifo(empty_fifo),
+		.din(din),
+		.clk_vga(clk_vga),
+		.rd_en(rd_en),
+		.threshold(threshold),
+		//HDMI output
+		.gpdi_dp(gpdi_dp)
+    );
+	
+	sobel_convolution m3 
+	 (	
+		.clk_w(clk),
+		.clk_r(clk_sdram),
+		.rst_n(rst_n),
+		.din(dout_sobel), //data from camera fifo
+		.data_count_r_sobel(data_count_r_sobel), //camera fifo is now available UNTIL the next rising edge
+		.rd_fifo(rd_sobel), 
+		.rd_fifo_cam(rd_en_sobel),
+		.dout(sobel_data), //data to be stored in sdram
+		.data_count_r(data_count_sobel)
+    );
+	 
+	
+	//SDRAM clock
+	pll_SDRAM m4
+   (
+    .clkin(clk),      // IN
+    .clkout0(clk_sdram)     // OUT
+	);      
+	
+	 debounce_explicit m5
+	(
+		.clk(clk),
+		.rst_n(rst_n),
+		.sw({key[0]}),
+		.db_level(),
+		.db_tick(key1_tick)
+    );
+	 
+	 debounce_explicit m6
+	(
+		.clk(clk),
+		.rst_n(rst_n),
+		.sw({key[1]}),
+		.db_level(),
+		.db_tick(key2_tick)
+    );
+	 
+	 debounce_explicit m7
+	(
+		.clk(clk), 
+		.rst_n(rst_n),
+		.sw({key[2]}),
+		.db_level(),
+		.db_tick(key3_tick)
+    );
+	
+	   
+	
+
+	 
+	 
+
+endmodule
+`timescale 1ns / 1ps
+
+module vga_interface(
+	input wire clk,rst_n,
+	input wire sobel,
+	input wire align_tick,
+	//asyn_fifo IO
+	input wire empty_fifo,
+	input wire[16:0] din,
+	output wire clk_vga,
+	output reg rd_en,
+	input[7:0] threshold,
+	//HDMI output
+	output [3:0] gpdi_dp
+    );
+	 //FSM state declarations
+	 localparam delay=0,
+					idle=1,
+					display=2,
+					align_frame=1,
+					align_idle=0;
+					
+	 reg[1:0] state_q,state_d;
+	 wire[11:0] pixel_x,pixel_y;
+	 reg[7:0] red,green,blue;
+	 wire hsync,vsync,blank;
+	 wire[1:0] tmds_red,tmds_green,tmds_blue,tmds_clk;
+	 wire clk_5x;
+	 reg sobel_prev,state_align_q,state_align_d;
+	 reg[4:0] align_count_q,align_count_d;
+	 //register operations
+	 always @(posedge clk_vga,negedge rst_n) begin
+		if(!rst_n) begin
+			state_q<=delay;
+			state_align_q<=align_idle;
+			align_count_q<=0;
+		end
+		else begin
+			state_q<=state_d;
+			sobel_prev<=sobel;
+			state_align_q<=state_align_d;
+			align_count_q<=align_count_d;
+		end
+	 end
+	 
+	 //FSM next-state logic
+	 always @* begin
+	 state_d=state_q;
+	 state_align_d=state_align_q;
+	 align_count_d=align_count_q;
+	 rd_en=0;
+	 red=0;
+	 green=0;
+	 blue=0;
+
+		case(state_q)
+		  delay: if(blank) begin
+					state_d=idle;
+					state_align_d=align_frame;
+				 end
+			idle:  if(pixel_x==0 && pixel_y==0 && !empty_fifo) begin //wait for pixel-data coming from asyn_fifo 	
+							if(sobel) begin
+								red=(din>threshold)? 8'hff:0;
+								green=(din>threshold)? 8'hff:0;
+								blue=(din>threshold)? 8'hff:0;
+								/*red=din[7:0]; //grayscale
+								green=din[7:0];
+								blue=din[7:0];*/
+							end
+							else begin
+								red=din[15:11]<<3;
+								green=din[10:5]<<2;
+								blue=din[4:0]<<3;
+							end
+							rd_en=1;	
+							state_d=display;
+					end
+		display: if(!blank) begin //we will continue to read the asyn_fifo as long as current pixel coordinate is inside the visible screen(640x480) 
+							 begin
+								if(sobel) begin
+									red=(din>threshold)? 8'hff:0;
+									green=(din>threshold)? 8'hff:0;
+									blue=(din>threshold)? 8'hff:0;
+								end
+								else begin
+									red=din[15:11]<<3;
+									green=din[10:5]<<2;
+									blue=din[4:0]<<3;
+								end
+								rd_en=1;
+							end
+					end
+		default: state_d=delay;
+		endcase
+		
+		//automatically aligns frame when display changes (sobel-> rgb or rgb->sobel)
+		case(state_align_q)
+			 align_idle: if(sobel_prev != sobel) begin 
+								state_align_d=align_frame;
+								align_count_d=0;
+						 end
+			align_frame:  begin
+							if(sobel && din[8] && din[15:9]==0 && rd_en) begin //align sobel frame 
+								if(pixel_x==0 && pixel_y==0) begin 
+									rd_en=1;
+									align_count_d=align_count_q+1'b1;
+									if(align_count_q==5) state_align_d=align_idle; //align for 5 frames
+								end
+								else rd_en=0;
+							end
+							else if(!sobel && din==16'b00000_000000_11111 && rd_en) begin //align rgb frame
+								if(pixel_x==0 && pixel_y==0) begin 
+									rd_en=1;
+									align_count_d=align_count_q+1'b1;
+									if(align_count_q==5) state_align_d=align_idle; //align for 5 frames
+								end
+								else rd_en=0;
+							end
+						  end
+				default: state_align_d=align_idle;
+		endcase
+		
+		
+		
+		
+		
+		
+		
+		//debug
+		/*
+		if(pixel_x<640/8) {red,green,blue}={{5{1'b0}},{6{1'b0}},{5{1'b0}}};
+		else if (pixel_x<(640/8)*2) {red,green,blue}={{5{1'b0}},{6{1'b0}},{5{1'b1}}};
+		else if (pixel_x<(640/8)*3) {red,green,blue}={{5{1'b0}},{6{1'b1}},{5{1'b0}}};
+		else if (pixel_x<(640/8)*4) {red,green,blue}={{5{1'b0}},{6{1'b1}},{5{1'b1}}};
+		else if (pixel_x<(640/8)*5) {red,green,blue}={{5{1'b1}},{6{1'b0}},{5{1'b0}}};
+		else if (pixel_x<(640/8)*6) {red,green,blue}={{5{1'b1}},{6{1'b0}},{5{1'b1}}};
+		else if (pixel_x<(640/8)*7) {red,green,blue}={{5{1'b1}},{6{1'b1}},{5{1'b0}}};
+		else if (pixel_x<(640/8)*8) {red,green,blue}={{5{1'b1}},{6{1'b1}},{5{1'b1}}};*/
+	 end
+ 
+	
+	//ODDR instantiatons for Double-Data Rate operation
+		ODDRX1F ddr0_clock (.D0(tmds_clk   [0] ), .D1(tmds_clk   [1] ), .Q(gpdi_dp[3]), .SCLK(clk_5x), .RST(0));
+        ODDRX1F ddr0_red   (.D0(tmds_red   [0] ), .D1(tmds_red   [1] ), .Q(gpdi_dp[2]), .SCLK(clk_5x), .RST(0));
+        ODDRX1F ddr0_green (.D0(tmds_green [0] ), .D1(tmds_green [1] ), .Q(gpdi_dp[1]), .SCLK(clk_5x), .RST(0));
+        ODDRX1F ddr0_blue  (.D0(tmds_blue  [0] ), .D1(tmds_blue  [1] ), .Q(gpdi_dp[0]), .SCLK(clk_5x), .RST(0));
+		
+		
+		
+	//HDMI module instantiatons
+	pll_HDMI m0
+		(
+			.clkin(clk),
+			.clkout0(clk_5x),
+			.clkout1(clk_vga)
+		);
+
+	my_vga_clk_generator m1
+		(
+		   .pclk(clk_vga), 
+		   .out_hsync(hsync), 
+		   .out_vsync(vsync),
+		   .out_blank(blank),
+		   .out_hcnt(pixel_x), /* 0..2043 */
+		   .out_vcnt(pixel_y), /* 0..2043 */
+		   .reset_n(1'b1)
+		);
+
+	hdmi_device #(.DDR_ENABLED(1'b1)) m2
+		(
+			   .pclk(clk_vga),
+			   .tmds_clk(clk_5x), // 10 times faster of pclk if SDR , 5 times faster of pclk if DDR
+
+			   .in_vga_red(red),
+			   .in_vga_green(green),
+			   .in_vga_blue(blue),
+
+			   .in_vga_blank(blank),
+			   .in_vga_vsync(vsync),
+			   .in_vga_hsync(hsync),
+
+			   .out_tmds_red(tmds_red),
+			   .out_tmds_green(tmds_green),
+			   .out_tmds_blue(tmds_blue),
+			   .out_tmds_clk(tmds_clk)
+		   );
+	 
+endmodule
