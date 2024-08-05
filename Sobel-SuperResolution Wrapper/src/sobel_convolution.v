@@ -8,21 +8,22 @@ module sobel_convolution(
     output wire [16:0] dout,
     output wire [9:0] data_count_r
 );
-
     localparam init = 0, loop = 1;
-    
     reg state_q, state_d;
     reg [10:0] pixel_counter_q = 1920;
     reg [44:0] r_channel; // 9 * 5 bits
     reg [53:0] g_channel; // 9 * 6 bits
     reg [44:0] b_channel; // 9 * 5 bits
-    reg [16:0] data_write;
+    reg [23:0] data_write;  // Changed to 24 bits to preserve full color
     reg write;
     reg start_super_res;
     wire super_res_done;
     wire [23:0] super_res_out;
-
     wire data_available = data_count_r_sobel > 5;
+
+    // Calculate x and y coordinates
+    wire [10:0] x_coord = pixel_counter_q % 640;
+    wire [10:0] y_coord = pixel_counter_q / 640;
 
     // Superresolution module instance
     superresolution super_res (
@@ -30,6 +31,8 @@ module sobel_convolution(
         .rst_n(rst_n),
         .pixel_in({r_channel[22:15], g_channel[26:19], b_channel[22:15]}),
         .start_process(start_super_res),
+        .x_in(x_coord),
+        .y_in(y_coord),
         .pixel_out(super_res_out),
         .process_done(super_res_done)
     );
@@ -66,25 +69,28 @@ module sobel_convolution(
     always @(posedge clk_w or negedge rst_n) begin
         if (!rst_n) begin
             state_d <= init;
-            data_write <= 17'b0;
+            data_write <= 24'b0;
             write <= 1'b0;
         end else begin
             case (state_q)
                 init: if (pixel_counter_q == 0 && data_available) begin
                     state_d <= loop;
                 end
-                loop: if (super_res_done) begin
-                    data_write <= {1'b0, super_res_out[23:19], super_res_out[15:10], super_res_out[7:3]};
+                loop: begin
+                    // Preserve full 24-bit color output from superresolution
+                    data_write <= super_res_out;
                     write <= 1'b1;
-                end else begin
-                    write <= 1'b0;
+                    if (super_res_done) begin
+                        state_d <= init;
+                    end
                 end
                 default: state_d <= init;
             endcase
         end
     end
 
-    asyn_fifo #(.DATA_WIDTH(17), .FIFO_DEPTH_WIDTH(10)) output_fifo (
+    // Modified FIFO to handle 24-bit color
+    asyn_fifo #(.DATA_WIDTH(24), .FIFO_DEPTH_WIDTH(10)) output_fifo (
         .rst_n(rst_n),
         .clk_write(clk_w),
         .clk_read(clk_r),
@@ -96,5 +102,4 @@ module sobel_convolution(
         .empty(),
         .data_count_r(data_count_r)
     );
-
 endmodule

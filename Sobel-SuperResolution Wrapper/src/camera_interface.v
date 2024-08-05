@@ -84,11 +84,11 @@
     message[4]= 16'h12_04; // COM7,     set RGB color output
     message[5]= 16'h11_80; // CLKRC     internal PLL matches input clock
     message[6]= 16'h0C_00; // COM3,     default settings
-    message[7]= 16'h3E_00; // COM14,    no scaling, normal pclock
+    message[7]= 16'h3E_11; // COM14,    no scaling, normal pclock
     message[8]= 16'h04_00; // COM1,     disable CCIR656
     message[9]= 16'h40_d0; //COM15,     RGB565, full output range
     message[10]= 16'h3a_04; //TSLB       set correct output data sequence (magic)
-	 message[11]= 16'h14_18; //COM9       MAX AGC value x4 0001_1000
+	message[11]= 16'h14_18; //COM9       MAX AGC value x4 0001_1000
     message[12]= 16'h4F_B3; //MTX1       all of these are magical matrix coefficients
     message[13]= 16'h50_B3; //MTX2
     message[14]= 16'h51_00; //MTX3

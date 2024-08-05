@@ -31,7 +31,7 @@ localparam
 	/* VGA_1280x720@60Hz */          
 		 VPOL            = 1,	      
 		 HPOL            = 0,	      
-		 FRAME_RATE      = 30,	    
+		 FRAME_RATE      = 0.1,	    
 	/* vertical timing frame */     
 		 VBP             = 33,      
 		 VFP             = 10,      

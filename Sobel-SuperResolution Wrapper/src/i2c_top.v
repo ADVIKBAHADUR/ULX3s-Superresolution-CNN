@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module i2c_top //works on both i2c and SCCB mode(no pullups resistors needed) [NO REPEATED START ALLOWED]
-	#(parameter main_clock=25_000_000, freq=100_000, addr_bytes=2) //addr_bytes=number of bytes of an address
+	#(parameter main_clock=25_000_000, freq=100000, addr_bytes=2) //addr_bytes=number of bytes of an address
 	(
 	input wire clk, rst_n,
 	input wire start,stop,
