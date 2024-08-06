@@ -49,7 +49,7 @@ VHDL_FILES = \
 #  hdl/tmds_encoder.vhd
 
 # synthesis options
-#YOSYS_OPTIONS = -noccu2
+YOSYS_OPTIONS = -noccu2
 NEXTPNR_OPTIONS = --timing-allow-fail --speed 7
 
 SCRIPTS = scripts
