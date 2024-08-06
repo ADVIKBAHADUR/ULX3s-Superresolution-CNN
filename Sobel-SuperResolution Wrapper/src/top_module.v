@@ -127,7 +127,7 @@
 		.gpdi_dp(gpdi_dp)
     );
 	
-	sobel_convolution m3 
+	SuperResolutionSubTop m3 
 	 (	
 		.clk_w(clk),
 		.clk_r(clk_sdram),

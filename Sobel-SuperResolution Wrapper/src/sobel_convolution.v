@@ -1,4 +1,4 @@
-module sobel_convolution(
+module SuperResolutionSubTop(
     input wire clk_w, clk_r, rst_n,
     input wire [16:0] din,
     input wire [9:0] data_count_r_sobel,
@@ -12,10 +12,16 @@ module sobel_convolution(
     
     reg state_q, state_d;
     reg [10:0] pixel_counter_q = 1920;
-    reg [9:0] r_channel, g_channel, b_channel;
+    reg [4:0] r_channel;
+    reg [5:0] g_channel;
+    reg [4:0] b_channel;
     reg [16:0] data_write;
     reg write;
     wire data_available = data_count_r_sobel > 5;
+
+    // Frame sync
+    reg frame_sync;
+    reg [9:0] line_counter;
 
     // Signals for dual_port_sync modules
     reg we_1, we_2, we_3, we_4, we_5, we_6;
@@ -29,6 +35,8 @@ module sobel_convolution(
             pixel_counter_q <= 1920;
             rd_en <= 1'b0;
             rd_fifo_cam <= 1'b0;
+            frame_sync <= 1'b0;
+            line_counter <= 0;
         end else begin
             state_q <= state_d;
             rd_en <= 1'b0;
@@ -39,7 +47,18 @@ module sobel_convolution(
                 b_channel <= din[4:0];
                 rd_en <= 1'b1;
                 rd_fifo_cam <= 1'b1;
-                pixel_counter_q <= (pixel_counter_q == 1919) ? 0 : pixel_counter_q + 1'b1;
+                
+                if (pixel_counter_q == 1919) begin
+                    pixel_counter_q <= 0;
+                    if (line_counter == 479) begin
+                        line_counter <= 0;
+                        frame_sync <= ~frame_sync;
+                    end else begin
+                        line_counter <= line_counter + 1;
+                    end
+                end else begin
+                    pixel_counter_q <= pixel_counter_q + 1'b1;
+                end
             end
         end
     end
@@ -54,8 +73,8 @@ module sobel_convolution(
             we_1 = 1; we_4 = 1;
             addr_a_y = pixel_counter_q % 640;
             addr_a_x = pixel_counter_q % 640;
-            din_ram_y = r_channel;
-            din_ram_x = g_channel;
+            din_ram_y = {3'b0, r_channel};
+            din_ram_x = {2'b0, g_channel};
         end
     end
 
@@ -73,8 +92,8 @@ module sobel_convolution(
             loop: if (data_available) begin
                 addr_b_d = pixel_counter_q % 640;
                 write = 1;
-                // Simple pattern for debugging
-                data_write = {1'b0, dout_1[7:3], dout_4[7:2], b_channel[4:0]};
+                // Combine all color channels
+                data_write = {frame_sync, r_channel, g_channel, b_channel};
             end
             default: state_d = init;
         endcase 
