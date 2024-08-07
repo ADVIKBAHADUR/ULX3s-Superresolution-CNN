@@ -31,7 +31,7 @@
 	 wire state;
 	 wire rd_sobel;
 	 wire rd_en,rd_fifo;
-	 wire[8:0] sobel_data;
+	 wire[16:0] sobel_data;
 	 wire[9:0] data_count_sobel;
 	 wire rd_en_sobel;
 	 wire[16:0] dout_sobel;
