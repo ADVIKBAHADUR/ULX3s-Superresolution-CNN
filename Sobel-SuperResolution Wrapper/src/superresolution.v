@@ -1,253 +1,159 @@
-module superresolution(
+module superresolution #(
+    parameter PIXEL_WIDTH = 24,
+    parameter WEIGHT_ADDR_WIDTH = 18
+) (
     input wire clk,
     input wire rst_n,
-    input wire [23:0] pixel_in,
+    input wire [8:0] bram_addr, // Address for 3x3 neighborhood in BRAM
     input wire start_process,
-    input wire [10:0] x_in,
-    input wire [10:0] y_in,
-    output reg [23:0] pixel_out,
+    input wire [9:0] x_in,
+    input wire [9:0] y_in,
+    output reg [PIXEL_WIDTH-1:0] pixel_out,
     output reg process_done
 );
     // Parameters
-    parameter DATA_WIDTH = 8;
-    parameter WEIGHT_ADDR_WIDTH = 18;
-    parameter WIDTH = 640;
-    parameter HEIGHT = 480;
-    parameter SCALE = 2;
-    parameter OUT_WIDTH = WIDTH * SCALE;
-    parameter OUT_HEIGHT = HEIGHT * SCALE;
-    parameter BUFFER_LINES = 3;
+    localparam CONV_LAYERS = 5;
+    localparam MAX_CHANNELS = 12; // Maximum number of channels in any layer
 
     // Internal signals
-    wire [23:0] upsample_out, conv1_out, conv2_out, conv3_out, conv4_out, conv5_out, relu_out;
+    reg [PIXEL_WIDTH-1:0] neighborhood_bram [0:8];
+    wire [PIXEL_WIDTH-1:0] layer_input [0:8];
+    wire [MAX_CHANNELS*8-1:0] layer_output [0:CONV_LAYERS];
+    reg [2:0] current_layer;
     reg [WEIGHT_ADDR_WIDTH-1:0] weight_addr;
     reg load_weights;
-    reg [2:0] current_layer;
-    reg [8:0] weight_counter;
-
-    // Line buffers and processing state
-    reg [23:0] line_buffer [0:BUFFER_LINES-1][0:WIDTH-1];
-    reg [1:0] current_line;
-    reg [9:0] proc_x;
-    reg [8:0] proc_y;
-    reg [9:0] input_x;
-    reg [8:0] input_y;
-    reg processing;
-
+    
     // State machine states
-    localparam IDLE = 3'd0, LOAD_WEIGHTS = 3'd1, PROCESS_FRAME = 3'd2;
-    reg [1:0] state;
+    localparam IDLE = 3'd0, LOAD_WEIGHTS = 3'd1, PROCESS_UPSAMPLE = 3'd2, 
+               PROCESS_CONV = 3'd3, WAIT_CONV = 3'd4, FINISH = 3'd5;
+    reg [2:0] state;
 
-    // Debug signals
-    reg [7:0] debug_state;
-    reg [7:0] debug_weight;
-    reg [7:0] debug_pattern;
+    // BRAM for storing intermediate results
+    reg [MAX_CHANNELS*8-1:0] intermediate_bram [0:8];
+    reg [3:0] bram_write_addr, bram_read_addr;
 
-    // Instantiate your modules here
+    // Signals for conv_layer control
+    reg start_conv;
+    wire conv_done;
+
+    // Read 3x3 neighborhood from BRAM
+    genvar n;
+    generate
+        for (n = 0; n < 9; n = n + 1) begin : neighborhood_read
+            assign layer_input[n] = neighborhood_bram[bram_addr + n];
+        end
+    endgenerate
+
+    // Instantiate your layer modules here
     upsample_layer #(
-        .SCALE_FACTOR(2),
         .IN_CHANNELS(3),
         .OUT_CHANNELS(12),
-        .DATA_WIDTH(DATA_WIDTH),
+        .DATA_WIDTH(8),
         .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
     ) upsample (
         .clk(clk),
         .rst_n(rst_n),
-        .pixel_in(pixel_in),
-        .load_weights(load_weights && current_layer == 3'd0),
+        .pixel_in(layer_input[4]), // Center pixel
+        .load_weights(load_weights && current_layer == 0),
         .weight_addr(weight_addr),
-        .pixel_out(upsample_out)
+        .pixel_out(layer_output[0])
     );
 
-    conv_layer #(.IN_CHANNELS(3), .OUT_CHANNELS(9)) conv1 (
-        .clk(clk),
-        .rst_n(rst_n),
-        .pixel_in(upsample_out),
-        .load_weights(load_weights && current_layer == 3'd1),
-        .weight_addr(weight_addr),
-        .pixel_out(conv1_out)
-    );
-
-    conv_layer #(.IN_CHANNELS(9), .OUT_CHANNELS(9)) conv2 (
-        .clk(clk),
-        .rst_n(rst_n),
-        .pixel_in(conv1_out),
-        .load_weights(load_weights && current_layer == 3'd2),
-        .weight_addr(weight_addr),
-        .pixel_out(conv2_out)
-    );
-
-    conv_layer #(.IN_CHANNELS(9), .OUT_CHANNELS(9)) conv3 (
-        .clk(clk),
-        .rst_n(rst_n),
-        .pixel_in(conv2_out),
-        .load_weights(load_weights && current_layer == 3'd3),
-        .weight_addr(weight_addr),
-        .pixel_out(conv3_out)
-    );
-
-    conv_layer #(.IN_CHANNELS(9), .OUT_CHANNELS(9)) conv4 (
-        .clk(clk),
-        .rst_n(rst_n),
-        .pixel_in(conv3_out),
-        .load_weights(load_weights && current_layer == 3'd4),
-        .weight_addr(weight_addr),
-        .pixel_out(conv4_out)
-    );
-
-    conv_layer #(.IN_CHANNELS(9), .OUT_CHANNELS(3)) conv5 (
-        .clk(clk),
-        .rst_n(rst_n),
-        .pixel_in(conv4_out),
-        .load_weights(load_weights && current_layer == 3'd5),
-        .weight_addr(weight_addr),
-        .pixel_out(conv5_out)
-    );
-
-    relu relu_inst (
-        .pixel_in(conv5_out),
-        .pixel_out(relu_out)
-    );
-
-    // Function to convert a 4-bit value to a 24-bit color
-    function [23:0] value_to_color;
-        input [3:0] value;
-        begin
-            case(value)
-                4'h0: value_to_color = 24'hFFFFFF; // White
-                4'h1: value_to_color = 24'hFF0000; // Red
-                4'h2: value_to_color = 24'h00FF00; // Green
-                4'h3: value_to_color = 24'h0000FF; // Blue
-                4'h4: value_to_color = 24'hFFFF00; // Yellow
-                4'h5: value_to_color = 24'h00FFFF; // Cyan
-                4'h6: value_to_color = 24'hFF00FF; // Magenta
-                4'h7: value_to_color = 24'h800000; // Dark Red
-                4'h8: value_to_color = 24'h008000; // Dark Green
-                4'h9: value_to_color = 24'h000080; // Dark Blue
-                4'hA: value_to_color = 24'h808000; // Olive
-                4'hB: value_to_color = 24'h008080; // Teal
-                4'hC: value_to_color = 24'h800080; // Purple
-                4'hD: value_to_color = 24'h808080; // Gray
-                4'hE: value_to_color = 24'h400000; // Maroon
-                4'hF: value_to_color = 24'h000000; // Black
-            endcase
+    genvar i;
+    generate
+        for (i = 1; i <= CONV_LAYERS; i = i + 1) begin : conv_layers
+            conv_layer #(
+                .IN_CHANNELS(i == 1 ? 12 : 9),
+                .OUT_CHANNELS(i == CONV_LAYERS ? 3 : 9),
+                .DATA_WIDTH(8),
+                .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
+            ) conv (
+                .clk(clk),
+                .rst_n(rst_n),
+                .bram_addr(bram_read_addr),
+                .load_weights(load_weights && current_layer == i),
+                .weight_addr(weight_addr),
+                .start_conv(start_conv && current_layer == i),
+                .pixel_out(layer_output[i]),
+                .conv_done(conv_done)
+            );
         end
-    endfunction
+    endgenerate
 
+    integer j;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= IDLE;
             current_layer <= 0;
             weight_addr <= 0;
             load_weights <= 0;
-            weight_counter <= 0;
-            current_line <= 0;
-            proc_x <= 0;
-            proc_y <= 0;
-            input_x <= 0;
-            input_y <= 0;
-            processing <= 0;
             process_done <= 0;
             pixel_out <= 0;
-            debug_state <= 0;
-            debug_weight <= 0;
-            debug_pattern <= 0;
+            bram_write_addr <= 0;
+            bram_read_addr <= 0;
+            start_conv <= 0;
         end else begin
             case (state)
                 IDLE: begin
-                    debug_state <= 8'd0;
                     if (start_process) begin
                         state <= LOAD_WEIGHTS;
                         current_layer <= 0;
                         weight_addr <= 0;
                         load_weights <= 1;
-                        weight_counter <= 0;
-                        current_line <= 0;
-                        proc_x <= 0;
-                        proc_y <= 0;
-                        input_x <= 0;
-                        input_y <= 0;
-                        processing <= 0;
                         process_done <= 0;
                     end
                 end
+
                 LOAD_WEIGHTS: begin
-                    debug_state <= 8'd1;
                     weight_addr <= weight_addr + 1;
-                    weight_counter <= weight_counter + 1;
-                    debug_weight <= weight_addr[7:0]; // Use lower 8 bits of weight_addr for debug
-                    if (weight_counter == 255) begin  // Adjust based on your layer sizes
-                        if (current_layer == 5) begin
-                            state <= PROCESS_FRAME;
+                    if (weight_addr == (current_layer == 0 ? 435 : 328)) begin // Adjust these values based on your layer sizes
+                        if (current_layer == CONV_LAYERS) begin
+                            state <= PROCESS_UPSAMPLE;
                             load_weights <= 0;
-                            processing <= 1;
+                            current_layer <= 0;
                         end else begin
                             current_layer <= current_layer + 1;
-                            weight_counter <= 0;
+                            weight_addr <= 0;
                         end
                     end
                 end
-                PROCESS_FRAME: begin
-                    debug_state <= 8'd2;
-                    // Store input pixel in line buffer
-                    line_buffer[current_line][input_x] <= pixel_in;
 
-                    if (processing && input_x > 1 && input_y > 1) begin
-                        // For debugging, increment pattern instead of actual processing
-                        debug_pattern <= debug_pattern + 1;
+                PROCESS_UPSAMPLE: begin
+                    state <= PROCESS_CONV;
+                    current_layer <= 1;
+                    bram_write_addr <= 0;
+                    // Store upsample result in BRAM
+                    intermediate_bram[bram_write_addr] <= layer_output[0];
+                    bram_write_addr <= bram_write_addr + 1;
+                end
 
-                        // Move to next pixel
-                        if (proc_x < WIDTH - 2) begin
-                            proc_x <= proc_x + 1;
+                PROCESS_CONV: begin
+                    start_conv <= 1;
+                    state <= WAIT_CONV;
+                end
+
+                WAIT_CONV: begin
+                    start_conv <= 0;
+                    if (conv_done) begin
+                        // Store conv result in BRAM
+                        intermediate_bram[bram_write_addr] <= layer_output[current_layer];
+                        bram_write_addr <= bram_write_addr + 1;
+                        bram_read_addr <= bram_write_addr - 8; // Set read address for next layer
+                        if (current_layer < CONV_LAYERS) begin
+                            current_layer <= current_layer + 1;
+                            state <= PROCESS_CONV;
                         end else begin
-                            proc_x <= 0;
-                            if (proc_y < HEIGHT - 2) begin
-                                proc_y <= proc_y + 1;
-                                current_line <= (current_line + 1) % BUFFER_LINES;
-                            end else begin
-                                state <= IDLE;
-                                process_done <= 1;
-                            end
+                            state <= FINISH;
                         end
                     end
+                end
 
-                    // Move to next input pixel
-                    if (input_x < WIDTH - 1) begin
-                        input_x <= input_x + 1;
-                    end else begin
-                        input_x <= 0;
-                        if (input_y < HEIGHT - 1) begin
-                            input_y <= input_y + 1;
-                            current_line <= (current_line + 1) % BUFFER_LINES;
-                        end else begin
-                            input_y <= 0;
-                        end
-                    end
+                FINISH: begin
+                    pixel_out <= layer_output[CONV_LAYERS][23:0]; // Assuming 3 channel output
+                    process_done <= 1;
+                    state <= IDLE;
                 end
             endcase
-
-            // Overlay debug information
-            if (y_in < 16) begin
-                if (x_in < 16) begin
-                    // Display debug_state in top-left corner
-                    pixel_out <= value_to_color(debug_state[3:0]);
-                end else if (x_in < 32) begin
-                    // Display upper 4 bits of debug_weight
-                    pixel_out <= value_to_color(debug_weight[7:4]);
-                end else if (x_in < 48) begin
-                    // Display lower 4 bits of debug_weight
-                    pixel_out <= value_to_color(debug_weight[3:0]);
-                end else if (x_in < 64) begin
-                    // Display debug_pattern
-                    pixel_out <= value_to_color(debug_pattern[3:0]);
-                end
-            end else if (processing) begin
-                // Output debug pattern during processing
-                pixel_out <= {debug_pattern, debug_pattern, debug_pattern};
-            end else begin
-                // Pass through input pixel when not processing
-                pixel_out <= pixel_in;
-            end
         end
     end
 endmodule
@@ -348,19 +254,37 @@ module conv_layer #(
 )(
     input wire clk,
     input wire rst_n,
-    input wire [IN_CHANNELS*DATA_WIDTH-1:0] pixel_in,
+    input wire [3:0] bram_addr, // Address for 3x3 neighborhood in BRAM
     input wire load_weights,
     input wire [WEIGHT_ADDR_WIDTH-1:0] weight_addr,
-    output reg [OUT_CHANNELS*DATA_WIDTH-1:0] pixel_out
+    input wire start_conv,
+    output reg [OUT_CHANNELS*DATA_WIDTH-1:0] pixel_out,
+    output reg conv_done
 );
+    // BRAM for 3x3 neighborhood
+    reg [IN_CHANNELS*DATA_WIDTH-1:0] neighborhood_bram [0:8];
+    wire [IN_CHANNELS*DATA_WIDTH-1:0] pixel_in [0:8];
+
     // Weights and biases
     reg signed [DATA_WIDTH-1:0] weights [0:OUT_CHANNELS-1][0:IN_CHANNELS-1][0:KERNEL_SIZE-1][0:KERNEL_SIZE-1];
     reg signed [DATA_WIDTH-1:0] biases [0:OUT_CHANNELS-1];
     
     // Intermediate results
-    reg signed [2*DATA_WIDTH-1:0] conv_result [0:OUT_CHANNELS-1];
+    reg signed [2*DATA_WIDTH+3:0] conv_result [0:OUT_CHANNELS-1];
     
-    integer i, j, k, l, m;
+    // Counters for time-multiplexing
+    reg [3:0] out_channel_count;
+    reg [3:0] in_channel_count;
+    reg [3:0] kernel_count;
+    
+    // State machine
+    reg [2:0] state;
+    localparam IDLE = 3'd0, CONV = 3'd1, FINISH = 3'd2;
+
+    // Single multiplier
+    reg signed [DATA_WIDTH-1:0] mult_a, mult_b;
+    wire signed [2*DATA_WIDTH-1:0] mult_result;
+    assign mult_result = mult_a * mult_b;
 
     // Weight loader instance
     wire [DATA_WIDTH-1:0] weight_data;
@@ -376,7 +300,16 @@ module conv_layer #(
         .weight_out(weight_data)
     );
 
+    // Read 3x3 neighborhood from BRAM
+    genvar n;
+    generate
+        for (n = 0; n < 9; n = n + 1) begin : neighborhood_read
+            assign pixel_in[n] = neighborhood_bram[bram_addr + n];
+        end
+    endgenerate
+
     // Weight and bias loading logic
+    integer i, j, k, l;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
@@ -401,34 +334,70 @@ module conv_layer #(
         end
     end
 
-    // Parallel convolution logic
+    // Convolution logic with time-multiplexing
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            state <= IDLE;
+            out_channel_count <= 0;
+            in_channel_count <= 0;
+            kernel_count <= 0;
+            conv_done <= 0;
             for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
                 conv_result[i] <= 0;
                 pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= 0;
             end
-        end else if (!load_weights) begin
-            for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
-                conv_result[i] <= 0;
-                for (j = 0; j < IN_CHANNELS; j = j + 1) begin
-                    for (k = 0; k < KERNEL_SIZE; k = k + 1) begin
-                        for (l = 0; l < KERNEL_SIZE; l = l + 1) begin
-                            conv_result[i] <= conv_result[i] + 
-                                $signed(pixel_in[j*DATA_WIDTH +: DATA_WIDTH]) * 
-                                $signed(weights[i][j][k][l]);
+        end else begin
+            case (state)
+                IDLE: begin
+                    if (start_conv) begin
+                        state <= CONV;
+                        out_channel_count <= 0;
+                        in_channel_count <= 0;
+                        kernel_count <= 0;
+                        conv_done <= 0;
+                        for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                            conv_result[i] <= 0;
                         end
                     end
                 end
-                // Add bias and apply activation
-                if (conv_result[i] + biases[i] > {1'b0, {(DATA_WIDTH-1){1'b1}}}) begin
-                    pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b1}};
-                end else if (conv_result[i] + biases[i] < {1'b1, {(DATA_WIDTH-1){1'b0}}}) begin
-                    pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b0}};
-                end else begin
-                    pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= conv_result[i][DATA_WIDTH-1:0] + biases[i];
+
+                CONV: begin
+                    mult_a <= weights[out_channel_count][in_channel_count][kernel_count/3][kernel_count%3];
+                    mult_b <= pixel_in[kernel_count][in_channel_count*DATA_WIDTH +: DATA_WIDTH];
+                    
+                    conv_result[out_channel_count] <= conv_result[out_channel_count] + mult_result;
+
+                    if (kernel_count == 8) begin
+                        kernel_count <= 0;
+                        if (in_channel_count == IN_CHANNELS - 1) begin
+                            in_channel_count <= 0;
+                            if (out_channel_count == OUT_CHANNELS - 1) begin
+                                state <= FINISH;
+                            end else begin
+                                out_channel_count <= out_channel_count + 1;
+                            end
+                        end else begin
+                            in_channel_count <= in_channel_count + 1;
+                        end
+                    end else begin
+                        kernel_count <= kernel_count + 1;
+                    end
                 end
-            end
+
+                FINISH: begin
+                    for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                        if (conv_result[i] + biases[i] > {1'b0, {(DATA_WIDTH-1){1'b1}}}) begin
+                            pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b1}};
+                        end else if (conv_result[i] + biases[i] < {1'b1, {(DATA_WIDTH-1){1'b0}}}) begin
+                            pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b0}};
+                        end else begin
+                            pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= conv_result[i][DATA_WIDTH-1:0] + biases[i];
+                        end
+                    end
+                    conv_done <= 1;
+                    state <= IDLE;
+                end
+            endcase
         end
     end
 endmodule
