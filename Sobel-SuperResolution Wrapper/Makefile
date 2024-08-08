@@ -26,7 +26,7 @@ TOP_MODULE_FILE = src/$(TOP_MODULE).v
 
 VERILOG_FILES = \
   $(TOP_MODULE_FILE) \
-  src/sobel_convolution.v \
+  src/SubTop_superresolution.v \
   src/superresolution.v \
   src/asyn_fifo.v \
   src/camera_interface.v \
