@@ -2,7 +2,7 @@
 PROJECT ?= project
 BOARD ?= board
 FPGA_PREFIX ?=
-FPGA_SIZE ?= 12
+FPGA_SIZE ?= 85
 FPGA_CHIP ?= lfe5u-$(FPGA_SIZE)f
 FPGA_PACKAGE ?= CABGA381
 

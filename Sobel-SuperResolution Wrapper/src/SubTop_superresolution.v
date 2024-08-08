@@ -33,7 +33,7 @@ module SuperResolutionSubTop #(
     reg frame_buffer_we;
     reg [FRAME_ADDR_WIDTH-1:0] frame_buffer_addr;
 
-    // 3x3 neighborhood BRAM
+    // 3x3 neighborhood buffer
     reg [PIXEL_WIDTH-1:0] neighborhood_bram [0:8];
     wire [PIXEL_WIDTH-1:0] processed_pixel;
     wire process_done;
@@ -90,6 +90,50 @@ module SuperResolutionSubTop #(
         .data_count_r(data_count_r)
     );
 
+    // Sequential loading of neighborhood pixels
+    always @(posedge clk_r or negedge rst_n) begin
+        if (!rst_n) begin
+            frame_buffer_addr <= 0;
+            neighborhood_bram[0] <= 0;
+            neighborhood_bram[1] <= 0;
+            neighborhood_bram[2] <= 0;
+            neighborhood_bram[3] <= 0;
+            neighborhood_bram[4] <= 0;
+            neighborhood_bram[5] <= 0;
+            neighborhood_bram[6] <= 0;
+            neighborhood_bram[7] <= 0;
+            neighborhood_bram[8] <= 0;
+        end else if (state == PROCESS) begin
+            // Load 3x3 neighborhood into BRAM
+            neighborhood_bram[0] <= (process_addr >= WIDTH + 1) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr - WIDTH - 1;
+            #1;
+            neighborhood_bram[1] <= (process_addr >= WIDTH) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr - WIDTH;
+            #1;
+            neighborhood_bram[2] <= (process_addr >= WIDTH - 1) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr - WIDTH + 1;
+            #1;
+            neighborhood_bram[3] <= (process_addr % WIDTH != 0) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr - 1;
+            #1;
+            neighborhood_bram[4] <= frame_buffer_dout;
+            frame_buffer_addr <= process_addr;
+            #1;
+            neighborhood_bram[5] <= (process_addr % WIDTH != WIDTH - 1) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr + 1;
+            #1;
+            neighborhood_bram[6] <= (process_addr < WIDTH * (HEIGHT - 1)) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr + WIDTH - 1;
+            #1;
+            neighborhood_bram[7] <= (process_addr < WIDTH * (HEIGHT - 1) + 1) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr + WIDTH;
+            #1;
+            neighborhood_bram[8] <= (process_addr < WIDTH * HEIGHT - 1) ? frame_buffer_dout : 0;
+            frame_buffer_addr <= process_addr + WIDTH + 1;
+        end
+    end
+
     always @(posedge clk_w or negedge rst_n) begin
         if (!rst_n) begin
             state <= IDLE;
@@ -101,7 +145,6 @@ module SuperResolutionSubTop #(
             write_fifo <= 0;
             pixel_data <= 0;
             frame_buffer_we <= 0;
-            frame_buffer_addr <= 0;
             frame_buffer_din <= 0;
         end else begin
             case (state)
@@ -143,21 +186,6 @@ module SuperResolutionSubTop #(
                 end
 
                 PROCESS: begin
-                    // Load 3x3 neighborhood into BRAM
-                    neighborhood_bram[0] <= (process_addr >= WIDTH + 1) ? frame_buffer_dout : frame_buffer_dout;
-                    neighborhood_bram[1] <= (process_addr >= WIDTH) ? frame_buffer_dout : frame_buffer_dout;
-                    neighborhood_bram[2] <= (process_addr >= WIDTH - 1) ? frame_buffer_dout : frame_buffer_dout;
-                    neighborhood_bram[3] <= (process_addr % WIDTH != 0) ? frame_buffer_dout : frame_buffer_dout;
-                    neighborhood_bram[4] <= frame_buffer_dout;
-                    neighborhood_bram[5] <= (process_addr % WIDTH != WIDTH - 1) ? frame_buffer_dout : frame_buffer_dout;
-                    neighborhood_bram[6] <= (process_addr < WIDTH * (HEIGHT - 1)) ? frame_buffer_dout : frame_buffer_dout;
-                    neighborhood_bram[7] <= (process_addr < WIDTH * (HEIGHT - 1) + 1) ? frame_buffer_dout : frame_buffer_dout;
-                    neighborhood_bram[8] <= (process_addr < WIDTH * HEIGHT - 1) ? frame_buffer_dout : frame_buffer_dout;
-                    
-                    state <= WAIT_PROCESS;
-                end
-
-                WAIT_PROCESS: begin
                     if (process_done) begin
                         pixel_data <= processed_pixel;
                         write_fifo <= 1;
@@ -185,6 +213,8 @@ module SuperResolutionSubTop #(
     assign frame_done = (state == IDLE) && processing_done;
 
 endmodule
+
+
 
 // Dual-port BRAM module
 module dual_port_bram #(
