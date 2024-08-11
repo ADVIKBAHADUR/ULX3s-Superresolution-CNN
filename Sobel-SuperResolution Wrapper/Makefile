@@ -26,6 +26,7 @@ TOP_MODULE_FILE = src/$(TOP_MODULE).v
 
 VERILOG_FILES = \
   $(TOP_MODULE_FILE) \
+  src/ecp5pll.sv \
   src/SubTop_superresolution.v \
   src/superresolution.v \
   src/asyn_fifo.v \
@@ -50,7 +51,7 @@ VHDL_FILES = \
 
 # synthesis options
 YOSYS_OPTIONS = -noccu2
-NEXTPNR_OPTIONS = --timing-allow-fail --speed 7
+NEXTPNR_OPTIONS = --timing-allow-fail --speed 7 --lpf-allow-unconstrained
 
 SCRIPTS = scripts
 include $(SCRIPTS)/diamond_path.mk

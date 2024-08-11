@@ -380,7 +380,7 @@
 		else if(count_q<230400) pixel_d={{5{1'b1}},{6{1'b0}},{5{1'b1}}};
 		else if(count_q<268800) pixel_d={{5{1'b1}},{6{1'b1}},{5{1'b0}}};
 		else if(count_q<307200) pixel_d={{5{1'b1}},{6{1'b1}},{5{1'b1}}};*/
-		led_d=(empty_sobel || full) ? 8'b1111_1111:led_d;
+		led_d=(full) ? 8'b1111_1111:led_d;
 	 end
 	 
 
@@ -425,7 +425,7 @@
 	asyn_fifo #(.DATA_WIDTH(17),.FIFO_DEPTH_WIDTH(10)) m3 //1024x16 FIFO mem  FIFO_DEPTH_WIDTH=10 for prppoer output
 	(
 		.rst_n(rst_n),
-		.clk_write(clk_100),
+		.clk_write(clk),
 		.clk_read(clk), //clock input from both domains
 		.write(wr_en),
 		.read(rd_en_sobel), 

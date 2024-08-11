@@ -23,9 +23,9 @@
     );
 	 
 	 wire f2s_data_valid;
+	 reg [7:0] led_c;
 	 wire[10:0] data_count_r,data_count_r_sobel;
 	 wire[16:0] dout,din;
-	 wire clk_sdram;
 	 wire empty_fifo,empty;
 	 wire clk_vga,clk_sobel;
 	 wire state;
@@ -37,8 +37,31 @@
 	 wire[16:0] dout_sobel;
 	 reg[7:0] threshold=0;
 	 reg sobel=0;
-	 //register operation 
-	always @(posedge clk) begin
+	 //register operation
+
+
+	wire clk_sdram,clk_25_out;
+
+	assign clk_25_out = clocks[0];
+	assign clk_sdram = clocks[2];
+
+	wire [3:0] clocks;
+  ecp5pll
+  #(
+      .in_hz(25000000),
+    .out0_hz(25000000),                 .out0_tol_hz(0),	// use this for 25MHz
+    .out1_hz(50000000), .out1_deg( 90), .out1_tol_hz(0),
+    .out2_hz(100000000), .out2_deg(180), .out2_tol_hz(0),  // SDRAM clock
+    .out3_hz( 6000000), .out3_deg(300), .out3_tol_hz(0)
+  )
+  ecp5pll_inst
+  (
+    .clk_i(clk),
+    .clk_o(clocks)
+  );
+
+
+	always @(posedge clk_25_out) begin
 		if(!rst_n) begin
 			threshold=0;
 			sobel<=0;
@@ -54,7 +77,7 @@
 	//module instantiations
 	camera_interface m0 //control logic for retrieving data from camera, storing data to asyn_fifo, and  sending data to sdram
 	(
-		.clk(clk),
+		.clk(clk_25_out),
 		.clk_100(clk_sdram),
 		.rst_n(rst_n),
 		.key(),
@@ -77,7 +100,7 @@
 		.cmos_pwdn(cmos_pwdn),
 		.cmos_xclk(cmos_xclk),
 		//Debugging
-		.led(led) //lights up after successful SCCB transfer
+		.led(led_c) //lights up after successful SCCB transfer
     );
 	 
 	 sdram_interface m1 //control logic for writing the pixel-data from camera to sdram and reading pixel-data from sdram to vga
@@ -113,7 +136,7 @@
 	 
 	 vga_interface m2 //control logic for retrieving data from sdram, storing data to asyn_fifo, and sending data to vga
 	 (
-		.clk(clk),
+		.clk(clk_25_out),
 		.rst_n(rst_n),
 		.sobel(sobel),
 		.align_tick(key[3]),
@@ -129,7 +152,7 @@
 	
 	SuperResolutionSubTop m3 
 	 (	
-		.clk_w(clk),
+		.clk_w(clk_25_out),
 		.clk_r(clk_sdram),
 		.rst_n(rst_n),
 		.din(dout_sobel), //data from camera fifo
@@ -137,20 +160,23 @@
 		.rd_fifo(rd_sobel), 
 		.rd_fifo_cam(rd_en_sobel),
 		.dout(sobel_data), //data to be stored in sdram
-		.data_count_r(data_count_sobel)
+		.data_count_r(data_count_sobel), 
+		.led_s(led)
     );
 	 
-	
+// I think clock sound be done better 
+/*
 	//SDRAM clock
 	pll_SDRAM m4
    (
     .clkin(clk),      // IN
     .clkout0(clk_sdram)     // OUT
 	);      
+*/
 	
 	 debounce_explicit m5
 	(
-		.clk(clk),
+		.clk(clk_25_out),
 		.rst_n(rst_n),
 		.sw({key[0]}),
 		.db_level(),
@@ -159,7 +185,7 @@
 	 
 	 debounce_explicit m6
 	(
-		.clk(clk),
+		.clk(clk_25_out),
 		.rst_n(rst_n),
 		.sw({key[1]}),
 		.db_level(),
@@ -168,7 +194,7 @@
 	 
 	 debounce_explicit m7
 	(
-		.clk(clk), 
+		.clk(clk_25_out), 
 		.rst_n(rst_n),
 		.sw({key[2]}),
 		.db_level(),

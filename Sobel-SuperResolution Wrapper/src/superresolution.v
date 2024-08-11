@@ -1,7 +1,6 @@
 module superresolution #(
     parameter PIXEL_WIDTH = 24,
-    parameter WEIGHT_ADDR_WIDTH = 18,
-    parameter PARALLEL_MULTS = 5
+    parameter WEIGHT_ADDR_WIDTH = 18
 ) (
     input wire clk,
     input wire rst_n,
@@ -10,37 +9,32 @@ module superresolution #(
     input wire [9:0] x_in,
     input wire [9:0] y_in,
     output reg [PIXEL_WIDTH-1:0] pixel_out,
-    output reg process_done
+    output reg process_done,
+    output reg [7:0] debug_leds
 );
     // Parameters
     localparam CONV_LAYERS = 5;
     localparam MAX_CHANNELS = 12; // Maximum number of channels in any layer
 
-    // State machine states
-    localparam IDLE = 3'd0, LOAD_WEIGHTS = 3'd1, PROCESS_UPSAMPLE = 3'd2, 
-               PROCESS_CONV = 3'd3, WAIT_CONV = 3'd4, FINISH = 3'd5;
-
     // Internal signals
     reg [PIXEL_WIDTH-1:0] neighborhood_bram [0:8];
     wire [PIXEL_WIDTH-1:0] layer_input [0:8];
-    wire [MAX_CHANNELS*8-1:0] layer_output [0:CONV_LAYERS];
+    wire [MAX_CHANNELS*8-1:0] upsample_output;
     reg [2:0] current_layer;
     reg [WEIGHT_ADDR_WIDTH-1:0] weight_addr;
     reg load_weights;
+    
+    // State machine states
+    localparam IDLE = 3'd0, LOAD_WEIGHTS = 3'd1, PROCESS_UPSAMPLE = 3'd2, FINISH = 3'd3;
     reg [2:0] state;
-    reg [MAX_CHANNELS*8-1:0] intermediate_bram [0:8];
-    reg [3:0] bram_write_addr, bram_read_addr;
-    reg start_conv;
-    wire conv_done;
 
-    // Next state and output signals
-    reg [2:0] next_state;
-    reg [2:0] next_current_layer;
-    reg [WEIGHT_ADDR_WIDTH-1:0] next_weight_addr;
-    reg next_load_weights;
-    reg next_process_done;
-    reg [3:0] next_bram_write_addr, next_bram_read_addr;
-    reg next_start_conv;
+    // Debugging counters and flags
+    reg [31:0] debug_counter;
+    reg [31:0] upsample_wait_counter;
+    reg [31:0] pixel_processed_counter;
+    reg [31:0] weight_load_counter;
+    reg upsample_timeout;
+    wire [7:0] upsample_debug_leds;
 
     // Read 3x3 neighborhood from BRAM
     genvar n;
@@ -50,7 +44,7 @@ module superresolution #(
         end
     endgenerate
 
-    // Instantiate your layer modules here
+    // Upsample layer instance
     upsample_layer #(
         .IN_CHANNELS(3),
         .OUT_CHANNELS(12),
@@ -60,32 +54,11 @@ module superresolution #(
         .clk(clk),
         .rst_n(rst_n),
         .pixel_in(layer_input[4]), // Center pixel
-        .load_weights(load_weights && current_layer == 0),
+        .load_weights(load_weights && state == LOAD_WEIGHTS),
         .weight_addr(weight_addr),
-        .pixel_out(layer_output[0])
+        .pixel_out(upsample_output),
+        .debug_leds(upsample_debug_leds)
     );
-
-    genvar i;
-    generate
-        for (i = 1; i <= CONV_LAYERS; i = i + 1) begin : conv_layers
-            conv_layer #(
-                .IN_CHANNELS(i == 1 ? 12 : 9),
-                .OUT_CHANNELS(i == CONV_LAYERS ? 3 : 9),
-                .DATA_WIDTH(8),
-                .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH),
-                .PARALLEL_MULTS(PARALLEL_MULTS)
-            ) conv (
-                .clk(clk),
-                .rst_n(rst_n),
-                .bram_addr(bram_read_addr),
-                .load_weights(load_weights && current_layer == i),
-                .weight_addr(weight_addr),
-                .start_conv(start_conv && current_layer == i),
-                .pixel_out(layer_output[i]),
-                .conv_done(conv_done)
-            );
-        end
-    endgenerate
 
     // Sequential logic
     always @(posedge clk or negedge rst_n) begin
@@ -96,94 +69,71 @@ module superresolution #(
             load_weights <= 0;
             process_done <= 0;
             pixel_out <= 0;
-            bram_write_addr <= 0;
-            bram_read_addr <= 0;
-            start_conv <= 0;
+            debug_counter <= 0;
+            upsample_wait_counter <= 0;
+            pixel_processed_counter <= 0;
+            weight_load_counter <= 0;
+            upsample_timeout <= 0;
+            debug_leds <= 8'b0;
         end else begin
-            state <= next_state;
-            current_layer <= next_current_layer;
-            weight_addr <= next_weight_addr;
-            load_weights <= next_load_weights;
-            process_done <= next_process_done;
-            bram_write_addr <= next_bram_write_addr;
-            bram_read_addr <= next_bram_read_addr;
-            start_conv <= next_start_conv;
+            debug_counter <= debug_counter + 1;
+            
+            case (state)
+                IDLE: begin
+                    upsample_wait_counter <= 0;
+                    upsample_timeout <= 0;
+                    if (start_process) begin
+                        state <= LOAD_WEIGHTS;
+                        current_layer <= 0;
+                        weight_addr <= 0;
+                        load_weights <= 1;
+                        process_done <= 0;
+                        weight_load_counter <= 0;
+                    end
+                end
+
+                LOAD_WEIGHTS: begin
+                    weight_addr <= weight_addr + 1;
+                    weight_load_counter <= weight_load_counter + 1;
+                    if (weight_addr == 435) begin // Adjust this value based on your upsample layer size
+                        state <= PROCESS_UPSAMPLE;
+                        load_weights <= 0;
+                    end
+                end
+
+                PROCESS_UPSAMPLE: begin
+                    upsample_wait_counter <= upsample_wait_counter + 1;
+                    if (upsample_debug_leds[1]) begin // Assuming LED[1] indicates upsample completion
+                        pixel_out <= upsample_output[23:0]; // Assuming 3 channel output
+                        pixel_processed_counter <= pixel_processed_counter + 1;
+                        if (pixel_processed_counter >= WIDTH * HEIGHT - 1) begin
+                            state <= FINISH;
+                        end
+                        upsample_wait_counter <= 0;
+                    end else if (upsample_wait_counter >= 1000000) begin // Timeout after about 10ms at 100MHz
+                        upsample_timeout <= 1;
+                        state <= IDLE;
+                    end
+                end
+
+                FINISH: begin
+                    process_done <= 1;
+                    state <= IDLE;
+                end
+            endcase
+
+            // Debug LED indicators
+            debug_leds[0] <= (state == IDLE);
+            debug_leds[1] <= (state == LOAD_WEIGHTS);
+            debug_leds[2] <= (state == PROCESS_UPSAMPLE);
+            debug_leds[3] <= process_done;
+            debug_leds[4] <= upsample_timeout;
+            debug_leds[5] <= (weight_load_counter > 0 && weight_load_counter < 436);
+            debug_leds[6] <= (pixel_processed_counter > 0);
+            debug_leds[7] <= start_process;
         end
     end
 
-    // Combinational logic
-    always @* begin
-        next_state = state;
-        next_current_layer = current_layer;
-        next_weight_addr = weight_addr;
-        next_load_weights = load_weights;
-        next_process_done = process_done;
-        next_bram_write_addr = bram_write_addr;
-        next_bram_read_addr = bram_read_addr;
-        next_start_conv = start_conv;
-
-        case (state)
-            IDLE: begin
-                if (start_process) begin
-                    next_state = LOAD_WEIGHTS;
-                    next_current_layer = 0;
-                    next_weight_addr = 0;
-                    next_load_weights = 1;
-                    next_process_done = 0;
-                end
-            end
-
-            LOAD_WEIGHTS: begin
-                next_weight_addr = weight_addr + 1;
-                if (weight_addr == (current_layer == 0 ? 435 : 328)) begin
-                    if (current_layer == CONV_LAYERS) begin
-                        next_state = PROCESS_UPSAMPLE;
-                        next_load_weights = 0;
-                        next_current_layer = 0;
-                    end else begin
-                        next_current_layer = current_layer + 1;
-                        next_weight_addr = 0;
-                    end
-                end
-            end
-
-            PROCESS_UPSAMPLE: begin
-                next_state = PROCESS_CONV;
-                next_current_layer = 1;
-                next_bram_write_addr = 0;
-                // Store upsample result in BRAM
-                intermediate_bram[bram_write_addr] = layer_output[0];
-                next_bram_write_addr = bram_write_addr + 1;
-            end
-
-            PROCESS_CONV: begin
-                next_start_conv = 1;
-                next_state = WAIT_CONV;
-            end
-
-            WAIT_CONV: begin
-                next_start_conv = 0;
-                if (conv_done) begin
-                    // Store conv result in BRAM
-                    intermediate_bram[bram_write_addr] = layer_output[current_layer];
-                    next_bram_write_addr = bram_write_addr + 1;
-                    next_bram_read_addr = bram_write_addr - 8;
-                    if (current_layer < CONV_LAYERS) begin
-                        next_current_layer = current_layer + 1;
-                        next_state = PROCESS_CONV;
-                    end else begin
-                        next_state = FINISH;
-                    end
-                end
-            end
-
-            FINISH: begin
-                pixel_out = layer_output[CONV_LAYERS][23:0];
-                next_process_done = 1;
-                next_state = IDLE;
-            end
-        endcase
-    end
 endmodule
 
 module weight_loader #(
@@ -224,12 +174,19 @@ module upsample_layer #(
     input wire [IN_CHANNELS*DATA_WIDTH-1:0] pixel_in,
     input wire load_weights,
     input wire [WEIGHT_ADDR_WIDTH-1:0] weight_addr,
-    output reg [OUT_CHANNELS*DATA_WIDTH-1:0] pixel_out
+    output reg [OUT_CHANNELS*DATA_WIDTH-1:0] pixel_out,
+    output reg [7:0] debug_leds
 );
     wire [DATA_WIDTH-1:0] weight;
     reg [2*DATA_WIDTH-1:0] conv_result [0:OUT_CHANNELS-1];
     reg [DATA_WIDTH-1:0] bias [0:OUT_CHANNELS-1];
-    integer i, j;
+    
+    // Debugging signals
+    reg [31:0] pixel_counter;
+    reg [31:0] weight_counter;
+    reg [31:0] conv_counter;
+    reg pixelshuffle_done;
+    reg conv_done;
 
     weight_loader #(
         .ADDR_WIDTH(WEIGHT_ADDR_WIDTH),
@@ -243,6 +200,7 @@ module upsample_layer #(
         .weight_out(weight)
     );
 
+    integer i, j;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
@@ -250,8 +208,15 @@ module upsample_layer #(
                 bias[i] <= 0;
                 pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= 0;
             end
+            pixel_counter <= 0;
+            weight_counter <= 0;
+            conv_counter <= 0;
+            pixelshuffle_done <= 0;
+            conv_done <= 0;
+            debug_leds <= 8'b0;
         end else begin
             if (load_weights) begin
+                weight_counter <= weight_counter + 1;
                 if (weight_addr < IN_CHANNELS * OUT_CHANNELS * 9) begin
                     for (i = 0; i < IN_CHANNELS; i = i + 1) begin
                         conv_result[(weight_addr/9) % OUT_CHANNELS] <= conv_result[(weight_addr/9) % OUT_CHANNELS] + 
@@ -261,6 +226,8 @@ module upsample_layer #(
                     bias[weight_addr % OUT_CHANNELS] <= weight;
                 end
             end else begin
+                pixel_counter <= pixel_counter + 1;
+                conv_counter <= conv_counter + 1;
                 for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
                     pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= 
                         (conv_result[i][2*DATA_WIDTH-1] ? 0 : 
@@ -268,7 +235,21 @@ module upsample_layer #(
                         conv_result[i][DATA_WIDTH-1:0])) + bias[i];
                     conv_result[i] <= 0;
                 end
+                conv_done <= 1;
+                if (conv_counter % (SCALE_FACTOR * SCALE_FACTOR) == 0) begin
+                    pixelshuffle_done <= 1;
+                end else begin
+                    pixelshuffle_done <= 0;
+                end
             end
+
+            // Debug LED indicators
+            debug_leds[0] <= (pixel_counter > 0);  // Blinks when a pixel enters
+            debug_leds[1] <= conv_done;            // Blinks when a pixel is processed
+            debug_leds[2] <= pixelshuffle_done;    // Blinks when pixelshuffle completes
+            debug_leds[3] <= load_weights;         // On during weight loading
+            debug_leds[4] <= (weight_counter > 0); // Blinks during weight loading
+            debug_leds[7:5] <= pixel_counter[2:0]; // Shows lower 3 bits of pixel counter
         end
     end
 endmodule
@@ -288,7 +269,8 @@ module conv_layer #(
     input wire [WEIGHT_ADDR_WIDTH-1:0] weight_addr,
     input wire start_conv,
     output reg [OUT_CHANNELS*DATA_WIDTH-1:0] pixel_out,
-    output reg conv_done
+    output reg conv_done,
+    output reg [7:0] debug_leds
 );
     // BRAM for 3x3 neighborhood
     reg [IN_CHANNELS*DATA_WIDTH-1:0] neighborhood_bram [0:8];
@@ -300,6 +282,7 @@ module conv_layer #(
     
     // Intermediate results
     reg signed [2*DATA_WIDTH+3:0] conv_result [0:OUT_CHANNELS-1];
+    reg signed [2*DATA_WIDTH+3:0] next_conv_result [0:OUT_CHANNELS-1];
     
     // Counters for time-multiplexing
     reg [3:0] out_channel_count, next_out_channel_count;
@@ -314,6 +297,11 @@ module conv_layer #(
     reg signed [DATA_WIDTH-1:0] mult_a [0:PARALLEL_MULTS-1];
     reg signed [DATA_WIDTH-1:0] mult_b [0:PARALLEL_MULTS-1];
     wire signed [2*DATA_WIDTH-1:0] mult_result [0:PARALLEL_MULTS-1];
+
+    // Debugging
+    reg [31:0] conv_cycles;
+    reg [31:0] idle_cycles;
+    reg conv_timeout;
 
     genvar i;
     generate
@@ -378,6 +366,10 @@ module conv_layer #(
             in_channel_count <= 0;
             kernel_count <= 0;
             conv_done <= 0;
+            conv_cycles <= 0;
+            idle_cycles <= 0;
+            conv_timeout <= 0;
+            // debug_leds <= 8'b0;
             for (j = 0; j < OUT_CHANNELS; j = j + 1) begin
                 conv_result[j] <= 0;
                 pixel_out[j*DATA_WIDTH +: DATA_WIDTH] <= 0;
@@ -394,19 +386,38 @@ module conv_layer #(
             for (j = 0; j < OUT_CHANNELS; j = j + 1) begin
                 conv_result[j] <= next_conv_result[j];
             end
+            
+            case (state)
+                IDLE: idle_cycles <= idle_cycles + 1;
+                CONV: conv_cycles <= conv_cycles + 1;
+                default: begin
+                    idle_cycles <= 0;
+                    conv_cycles <= 0;
+                end
+            endcase
+
+            if (conv_cycles > 1000000) begin // Timeout after about 10ms at 100MHz
+                conv_timeout <= 1;
+                state <= IDLE;
+            end
+
+            // Debug LED indicators
+            debug_leds[2:0] <= state;
+            debug_leds[3] <= start_conv;
+            debug_leds[4] <= conv_done;
+            debug_leds[5] <= load_weights;
+            debug_leds[6] <= (out_channel_count == OUT_CHANNELS - 1);
+            debug_leds[7] <= conv_timeout;
         end
     end
 
     // Combinational logic
-    reg signed [2*DATA_WIDTH+3:0] next_conv_result [0:OUT_CHANNELS-1];
-    reg next_conv_done;
-
     always @* begin
         next_state = state;
         next_out_channel_count = out_channel_count;
         next_in_channel_count = in_channel_count;
         next_kernel_count = kernel_count;
-        next_conv_done = conv_done;
+        conv_done = 0;
         for (j = 0; j < OUT_CHANNELS; j = j + 1) begin
             next_conv_result[j] = conv_result[j];
         end
@@ -418,7 +429,6 @@ module conv_layer #(
                     next_out_channel_count = 0;
                     next_in_channel_count = 0;
                     next_kernel_count = 0;
-                    next_conv_done = 0;
                     for (j = 0; j < OUT_CHANNELS; j = j + 1) begin
                         next_conv_result[j] = 0;
                     end
@@ -453,18 +463,19 @@ module conv_layer #(
             FINISH: begin
                 for (j = 0; j < OUT_CHANNELS; j = j + 1) begin
                     if (conv_result[j] + biases[j] > {1'b0, {(DATA_WIDTH-1){1'b1}}}) begin
-                        pixel_out[j*DATA_WIDTH +: DATA_WIDTH] = {DATA_WIDTH{1'b1}}; 
+                        pixel_out[j*DATA_WIDTH +: DATA_WIDTH] = {DATA_WIDTH{1'b1}};
                     end else if (conv_result[j] + biases[j] < {1'b1, {(DATA_WIDTH-1){1'b0}}}) begin
                         pixel_out[j*DATA_WIDTH +: DATA_WIDTH] = {DATA_WIDTH{1'b0}};
                     end else begin
                         pixel_out[j*DATA_WIDTH +: DATA_WIDTH] = conv_result[j][DATA_WIDTH-1:0] + biases[j];
                     end
                 end
-                next_conv_done = 1;
+                conv_done = 1;
                 next_state = IDLE;
             end
         endcase
     end
+
 endmodule
 
 module relu(
