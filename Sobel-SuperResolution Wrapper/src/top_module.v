@@ -23,7 +23,9 @@
     );
 	 
 	 wire f2s_data_valid;
-	 reg [7:0] led_c;
+	 reg [7:0] led_c, led_s; 
+	 reg [31:0] led_switch_counter;
+	 reg ledswitcher;
 	 wire[10:0] data_count_r,data_count_r_sobel;
 	 wire[16:0] dout,din;
 	 wire empty_fifo,empty;
@@ -65,12 +67,26 @@
 		if(!rst_n) begin
 			threshold=0;
 			sobel<=0;
+			led_switch_counter <= 0;
+			ledswitcher = 0;
 		end
 		else begin
 			threshold=key1_tick? threshold+1:threshold;  //decrease sensitivity of sobel edge detection
 			threshold=key2_tick? threshold-1:threshold;	//increase sensitivity of sobel edge detection
 			sobel<=key3_tick? !sobel:sobel; //choose whether to display the raw videoe or the edge detected video
-		end
+
+			led_switch_counter <= led_switch_counter + 1;
+			if(led_switch_counter == 125000000) begin
+				ledswitcher = !ledswitcher;
+				led_switch_counter <=0;
+			end
+
+			if(ledswitcher) begin
+				led = led_c;
+			end else if (!ledswitcher) begin
+				led = led_s;
+			end
+ 		end
 	end
 	
 	
@@ -161,7 +177,7 @@
 		.rd_fifo_cam(rd_en_sobel),
 		.dout(sobel_data), //data to be stored in sdram
 		.data_count_r(data_count_sobel), 
-		.led_s(led)
+		.led_s(led_s)
     );
 	 
 // I think clock sound be done better 

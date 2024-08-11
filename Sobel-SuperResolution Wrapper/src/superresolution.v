@@ -1,6 +1,8 @@
 module superresolution #(
     parameter PIXEL_WIDTH = 24,
-    parameter WEIGHT_ADDR_WIDTH = 18
+    parameter WEIGHT_ADDR_WIDTH = 18,
+    parameter WIDTH = 320,
+    parameter HEIGHT = 240
 ) (
     input wire clk,
     input wire rst_n,
@@ -54,7 +56,7 @@ module superresolution #(
         .clk(clk),
         .rst_n(rst_n),
         .pixel_in(layer_input[4]), // Center pixel
-        .load_weights(load_weights && state == LOAD_WEIGHTS),
+        .load_weights(load_weights),
         .weight_addr(weight_addr),
         .pixel_out(upsample_output),
         .debug_leds(upsample_debug_leds)
@@ -86,7 +88,7 @@ module superresolution #(
                         state <= LOAD_WEIGHTS;
                         current_layer <= 0;
                         weight_addr <= 0;
-                        load_weights <= 1;
+                        load_weights <= 1;  // Start loading weights
                         process_done <= 0;
                         weight_load_counter <= 0;
                     end
@@ -97,7 +99,7 @@ module superresolution #(
                     weight_load_counter <= weight_load_counter + 1;
                     if (weight_addr == 435) begin // Adjust this value based on your upsample layer size
                         state <= PROCESS_UPSAMPLE;
-                        load_weights <= 0;
+                        load_weights <= 0;  // Stop loading weights
                     end
                 end
 
@@ -123,12 +125,12 @@ module superresolution #(
             endcase
 
             // Debug LED indicators
-            debug_leds[0] <= (state == IDLE);
-            debug_leds[1] <= (state == LOAD_WEIGHTS);
-            debug_leds[2] <= (state == PROCESS_UPSAMPLE);
-            debug_leds[3] <= process_done;
+            debug_leds[0] <= (state == IDLE ? 0 : (state ==  LOAD_WEIGHTS ? 1 : (state == PROCESS_UPSAMPLE ? 0 : (state == FINISH))));
+            debug_leds[1] <= (state == IDLE ? 0 : (state ==  LOAD_WEIGHTS ? 0 : (state == PROCESS_UPSAMPLE ? 1 : (state == FINISH))));
+            debug_leds[2] <= process_done;
+            debug_leds[3] <= upsample_debug_leds[1];
             debug_leds[4] <= upsample_timeout;
-            debug_leds[5] <= (weight_load_counter > 0 && weight_load_counter < 436);
+            debug_leds[5] <= load_weights;
             debug_leds[6] <= (pixel_processed_counter > 0);
             debug_leds[7] <= start_process;
         end
@@ -187,6 +189,7 @@ module upsample_layer #(
     reg [31:0] conv_counter;
     reg pixelshuffle_done;
     reg conv_done;
+    reg weights_loaded;
 
     weight_loader #(
         .ADDR_WIDTH(WEIGHT_ADDR_WIDTH),
@@ -213,6 +216,7 @@ module upsample_layer #(
             conv_counter <= 0;
             pixelshuffle_done <= 0;
             conv_done <= 0;
+            weights_loaded <= 0;
             debug_leds <= 8'b0;
         end else begin
             if (load_weights) begin
@@ -225,7 +229,10 @@ module upsample_layer #(
                 end else begin
                     bias[weight_addr % OUT_CHANNELS] <= weight;
                 end
-            end else begin
+                if (weight_counter == IN_CHANNELS * OUT_CHANNELS * 9 + OUT_CHANNELS - 1) begin
+                    weights_loaded <= 1;
+                end
+            end else if (weights_loaded) begin
                 pixel_counter <= pixel_counter + 1;
                 conv_counter <= conv_counter + 1;
                 for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
@@ -248,8 +255,9 @@ module upsample_layer #(
             debug_leds[1] <= conv_done;            // Blinks when a pixel is processed
             debug_leds[2] <= pixelshuffle_done;    // Blinks when pixelshuffle completes
             debug_leds[3] <= load_weights;         // On during weight loading
-            debug_leds[4] <= (weight_counter > 0); // Blinks during weight loading
-            debug_leds[7:5] <= pixel_counter[2:0]; // Shows lower 3 bits of pixel counter
+            debug_leds[4] <= weights_loaded;       // On when weights are fully loaded
+            debug_leds[5] <= (weight_counter > 0); // Blinks during weight loading
+            debug_leds[7:6] <= pixel_counter[1:0]; // Shows lower 2 bits of pixel counter
         end
     end
 endmodule
