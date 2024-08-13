@@ -28,6 +28,7 @@ SOURCES = 	superresolutiontb.v \
   ../src/tmds_encoder.v \
   ../src/vga_interface.v \
   ../src/sdram_controller.v \
+  ../src/ecp5pll.v \
 # preparing the machine code
 HEX =	rom.hex
 
@@ -37,7 +38,7 @@ TOP = superresolutiontb
 # Executables
 VLOG = iverilog
 WAVE = gtkwave
-TECH_LIB = ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/cells_sim.v -I ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/
+TECH_LIB = ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/cells_sim.v -I ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/ ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/cells_bb.v
 ASM6502 = acme
 HEXDUMP = hexdump
 HEXDUMP_ARGS = -v -e '1/1 "%02x " "\n"'

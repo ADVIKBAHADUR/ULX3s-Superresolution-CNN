@@ -139,6 +139,39 @@ module asyn_fifo
 endmodule
 
 
+// Dual-port BRAM module
+module dual_port_bram #(
+    parameter DATA_WIDTH = 24,
+    parameter ADDR_WIDTH = 18
+) (
+    input wire clka, clkb,
+    input wire ena, enb,
+    input wire wea, web,
+    input wire [ADDR_WIDTH-1:0] addra, addrb,
+    input wire [DATA_WIDTH-1:0] dia, dib,
+    output reg [DATA_WIDTH-1:0] doa, dob
+);
+
+    reg [DATA_WIDTH-1:0] ram [0:(1<<ADDR_WIDTH)-1];
+
+    always @(posedge clka) begin
+        if (ena) begin
+            if (wea)
+                ram[addra] <= dia;
+            doa <= ram[addra];
+        end
+    end
+
+    always @(posedge clkb) begin
+        if (enb) begin
+            if (web)
+                ram[addrb] <= dib;
+            dob <= ram[addrb];
+        end
+    end
+
+endmodule
+
 
 	//inference template for dual port block ram
 module dual_port_sync
