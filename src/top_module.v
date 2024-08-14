@@ -1,11 +1,11 @@
 module top_module(
     input wire clk,rst_n,
-    input wire[3:0] key, //key[1:0] for threshold control, key[2] unused, key[3] to toggle between regular camera and superresolution
+    input wire[3:0] key, //key[1:0] for threshold control, key[2] for switching display(RGB/Edge Detector), key[3] to automatically align sobel frame(if misaligned)
     //camera pinouts
     input wire cmos_pclk,cmos_href,cmos_vsync,
     input wire[7:0] cmos_db,
     inout cmos_sda,cmos_scl, 
-    output wire cmos_rst_n, cmos_pwdn, cmos_xclx,
+    output wire cmos_rst_n, cmos_pwdn, cmos_xclk,
     //Debugging
     output[7:0] led, 
     //controller to sdram
@@ -36,8 +36,8 @@ module top_module(
     wire rd_en_sobel;
     wire[16:0] dout_sobel;
     reg[7:0] threshold=0;
-    reg use_superresolution = 0;  // New register to control superresolution toggle
-    
+    reg sobel=0;
+
     wire clk_sdram,clk_25_out;
 
     assign clk_25_out = clocks[0];
@@ -60,20 +60,20 @@ module top_module(
 
     always @(posedge clk_25_out) begin
         if(!rst_n) begin
-            threshold = 0;
-            use_superresolution <= 0;
+            threshold=0;
+            sobel<=0;
             led_switch_counter <= 0;
             ledswitcher = 0;
         end
         else begin
-            threshold = key1_tick? threshold+1 : threshold;  //decrease sensitivity of sobel edge detection
-            threshold = key2_tick? threshold-1 : threshold;    //increase sensitivity of sobel edge detection
-            use_superresolution <= key3_tick? !use_superresolution : use_superresolution; // Toggle superresolution
+            threshold=key1_tick? threshold+1:threshold;  //decrease sensitivity of sobel edge detection
+            threshold=key2_tick? threshold-1:threshold;    //increase sensitivity of sobel edge detection
+            sobel<=key3_tick? !sobel:sobel; //choose whether to display the raw video or the edge detected video
 
             led_switch_counter <= led_switch_counter + 1;
             if(led_switch_counter == 125000000) begin
                 ledswitcher = !ledswitcher;
-                led_switch_counter <= 0;
+                led_switch_counter <=0;
             end
 
             if(ledswitcher) begin
@@ -107,7 +107,7 @@ module top_module(
         .cmos_scl(cmos_scl), 
         .cmos_rst_n(cmos_rst_n),
         .cmos_pwdn(cmos_pwdn),
-        .cmos_xclk(cmos_xclx),
+        .cmos_xclk(cmos_xclk),
         //Debugging
         .led(led_c)
     );
@@ -117,7 +117,7 @@ module top_module(
         .rst_n(rst_n),
         .clk_vga(clk_vga),
         .rd_en(rd_en),
-        .sobel(1'b0),  // We're not using Sobel here
+        .sobel(sobel),
         //fifo for camera
         .data_count_camera_fifo(data_count_r),
         .din(dout),
@@ -145,8 +145,8 @@ module top_module(
     vga_interface m2 (
         .clk(clk_25_out),
         .rst_n(rst_n),
-        .sobel(1'b0),  // We're not using Sobel here
-        .align_tick(1'b0),  // Not used for alignment
+        .sobel(sobel),
+        .align_tick(key[3]),
         //asyn_fifo IO
         .empty_fifo(empty_fifo),
         .din(din),
@@ -167,8 +167,7 @@ module top_module(
         .rd_fifo_cam(rd_en_sobel),
         .dout(sobel_data), //data to be stored in sdram
         .data_count_r(data_count_sobel), 
-        .led_s(led_s),
-        .bypass_super_resolution(!use_superresolution)  // Control superresolution bypass
+        .led_s(led_s)
     );
      
     debounce_explicit m5 (
