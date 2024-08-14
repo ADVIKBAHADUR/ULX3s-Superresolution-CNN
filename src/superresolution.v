@@ -6,20 +6,26 @@ module superresolution #(
 ) (
     input wire clk,
     input wire rst_n,
+    input wire [8:0] bram_addr,
     input wire start_process,
     input wire [9:0] x_in,
     input wire [9:0] y_in,
     input wire [9*PIXEL_WIDTH-1:0] neighborhood,
     output reg [PIXEL_WIDTH-1:0] pixel_out,
     output reg process_done,
+    output reg pixel_done,
     output reg [7:0] debug_leds
 );
     // Parameters
-    localparam TOTAL_LAYERS = 6; // Upsample + 5 Conv layers
-    localparam MAX_CHANNELS = 12; // Maximum number of channels in any layer
+    localparam CONV_LAYERS = 5;
+    localparam MAX_CHANNELS = 12;
+    localparam KERNEL_SIZE = 3;
+    localparam UPSAMPLE_IN_CHANNELS = 3;
+    localparam UPSAMPLE_OUT_CHANNELS = 12;
+    localparam UPSAMPLE_DATA_WIDTH = 8;
 
     // Internal signals
-    wire [9*PIXEL_WIDTH-1:0] layer_input;
+    wire [PIXEL_WIDTH-1:0] layer_input [0:8];
     wire [MAX_CHANNELS*8-1:0] upsample_output;
     wire [8*9-1:0] conv1_output, conv2_output, conv3_output, conv4_output;
     wire [PIXEL_WIDTH-1:0] conv5_output;
@@ -31,35 +37,39 @@ module superresolution #(
     localparam IDLE = 3'd0, LOAD_WEIGHTS = 3'd1, PROCESS_LAYERS = 3'd2, FINISH = 3'd3;
     reg [2:0] state;
 
-    // Debugging counters and flags
+    // Debugging and control signals
     reg [31:0] debug_counter;
     reg [31:0] layer_wait_counter;
     reg [31:0] pixel_processed_counter;
     reg [31:0] weight_load_counter;
     reg layer_timeout;
-
-    // Control signals for layers
-    reg [TOTAL_LAYERS-1:0] start_conv;
-    wire [TOTAL_LAYERS-1:0] conv_done;
+    wire [CONV_LAYERS:0] layer_done;
+    reg [CONV_LAYERS:0] start_layer;
 
     // Connect neighborhood to layer_input
-    assign layer_input = neighborhood;
+    genvar n;
+    generate
+        for (n = 0; n < 9; n = n + 1) begin : neighborhood_connect
+            assign layer_input[n] = neighborhood[n*PIXEL_WIDTH +: PIXEL_WIDTH];
+        end
+    endgenerate
 
     // Upsample layer instance
     upsample_layer #(
-        .IN_CHANNELS(3),
-        .OUT_CHANNELS(12),
-        .DATA_WIDTH(8),
+        .IN_CHANNELS(UPSAMPLE_IN_CHANNELS),
+        .OUT_CHANNELS(UPSAMPLE_OUT_CHANNELS),
+        .KERNEL_SIZE(KERNEL_SIZE),
+        .DATA_WIDTH(UPSAMPLE_DATA_WIDTH),
         .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
     ) upsample (
         .clk(clk),
         .rst_n(rst_n),
-        .pixel_in(layer_input),
+        .pixel_in(neighborhood),
         .load_weights(load_weights && current_layer == 0),
         .weight_addr(weight_addr),
-        .start_conv(start_conv[0]),
+        .start_conv(start_layer[0]),
         .pixel_out(upsample_output),
-        .conv_done(conv_done[0]),
+        .conv_done(layer_done[0]),
         .debug_leds()
     );
 
@@ -67,6 +77,7 @@ module superresolution #(
     conv_layer #(
         .IN_CHANNELS(12),
         .OUT_CHANNELS(9),
+        .KERNEL_SIZE(KERNEL_SIZE),
         .DATA_WIDTH(8),
         .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
     ) conv1 (
@@ -74,16 +85,17 @@ module superresolution #(
         .rst_n(rst_n),
         .load_weights(load_weights && current_layer == 1),
         .weight_addr(weight_addr),
-        .start_conv(start_conv[1]),
+        .start_conv(start_layer[1]),
         .pixel_in(upsample_output),
         .pixel_out(conv1_output),
-        .conv_done(conv_done[1]),
+        .conv_done(layer_done[1]),
         .debug_leds()
     );
 
     conv_layer #(
         .IN_CHANNELS(9),
         .OUT_CHANNELS(9),
+        .KERNEL_SIZE(KERNEL_SIZE),
         .DATA_WIDTH(8),
         .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
     ) conv2 (
@@ -91,16 +103,17 @@ module superresolution #(
         .rst_n(rst_n),
         .load_weights(load_weights && current_layer == 2),
         .weight_addr(weight_addr),
-        .start_conv(start_conv[2]),
+        .start_conv(start_layer[2]),
         .pixel_in(conv1_output),
         .pixel_out(conv2_output),
-        .conv_done(conv_done[2]),
+        .conv_done(layer_done[2]),
         .debug_leds()
     );
 
     conv_layer #(
         .IN_CHANNELS(9),
         .OUT_CHANNELS(9),
+        .KERNEL_SIZE(KERNEL_SIZE),
         .DATA_WIDTH(8),
         .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
     ) conv3 (
@@ -108,16 +121,17 @@ module superresolution #(
         .rst_n(rst_n),
         .load_weights(load_weights && current_layer == 3),
         .weight_addr(weight_addr),
-        .start_conv(start_conv[3]),
+        .start_conv(start_layer[3]),
         .pixel_in(conv2_output),
         .pixel_out(conv3_output),
-        .conv_done(conv_done[3]),
+        .conv_done(layer_done[3]),
         .debug_leds()
     );
 
     conv_layer #(
         .IN_CHANNELS(9),
         .OUT_CHANNELS(9),
+        .KERNEL_SIZE(KERNEL_SIZE),
         .DATA_WIDTH(8),
         .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
     ) conv4 (
@@ -125,16 +139,17 @@ module superresolution #(
         .rst_n(rst_n),
         .load_weights(load_weights && current_layer == 4),
         .weight_addr(weight_addr),
-        .start_conv(start_conv[4]),
+        .start_conv(start_layer[4]),
         .pixel_in(conv3_output),
         .pixel_out(conv4_output),
-        .conv_done(conv_done[4]),
+        .conv_done(layer_done[4]),
         .debug_leds()
     );
 
     conv_layer #(
         .IN_CHANNELS(9),
         .OUT_CHANNELS(3),
+        .KERNEL_SIZE(KERNEL_SIZE),
         .DATA_WIDTH(8),
         .WEIGHT_ADDR_WIDTH(WEIGHT_ADDR_WIDTH)
     ) conv5 (
@@ -142,10 +157,10 @@ module superresolution #(
         .rst_n(rst_n),
         .load_weights(load_weights && current_layer == 5),
         .weight_addr(weight_addr),
-        .start_conv(start_conv[5]),
+        .start_conv(start_layer[5]),
         .pixel_in(conv4_output),
         .pixel_out(conv5_output),
-        .conv_done(conv_done[5]),
+        .conv_done(layer_done[5]),
         .debug_leds()
     );
 
@@ -164,6 +179,7 @@ module superresolution #(
             weight_addr <= 0;
             load_weights <= 0;
             process_done <= 0;
+            pixel_done <= 0;
             pixel_out <= 0;
             debug_counter <= 0;
             layer_wait_counter <= 0;
@@ -171,7 +187,7 @@ module superresolution #(
             weight_load_counter <= 0;
             layer_timeout <= 0;
             debug_leds <= 8'b0;
-            start_conv <= 0;
+            start_layer <= 0;
         end else begin
             debug_counter <= debug_counter + 1;
             
@@ -179,7 +195,8 @@ module superresolution #(
                 IDLE: begin
                     layer_wait_counter <= 0;
                     layer_timeout <= 0;
-                    start_conv <= 0;
+                    pixel_done <= 0;
+                    start_layer <= 0;
                     if (start_process) begin
                         state <= LOAD_WEIGHTS;
                         current_layer <= 0;
@@ -193,35 +210,37 @@ module superresolution #(
                 LOAD_WEIGHTS: begin
                     weight_addr <= weight_addr + 1;
                     weight_load_counter <= weight_load_counter + 1;
-                    if (weight_load_counter == 1000) begin // Adjust this value based on your total weight count
+                    if (weight_load_counter == 180) begin // Adjust based on total weights
                         state <= PROCESS_LAYERS;
                         load_weights <= 0;
-                        start_conv[current_layer] <= 1;
+                        current_layer <= 0;
+                        start_layer[0] <= 1; // Start the first layer (upsample)
                     end
                 end
 
                 PROCESS_LAYERS: begin
                     layer_wait_counter <= layer_wait_counter + 1;
                     
-                    if (conv_done[current_layer]) begin
-                        start_conv[current_layer] <= 0;
-                        if (current_layer == TOTAL_LAYERS - 1) begin
+                    if (layer_done[current_layer]) begin
+                        start_layer[current_layer] <= 0;
+                        if (current_layer == CONV_LAYERS) begin
                             pixel_out <= relu_output;
+                            pixel_done <= 1;
                             pixel_processed_counter <= pixel_processed_counter + 1;
                             if (pixel_processed_counter >= WIDTH * HEIGHT - 1) begin
                                 state <= FINISH;
                             end else begin
                                 current_layer <= 0;
-                                start_conv[0] <= 1;
+                                start_layer[0] <= 1; // Start processing next pixel
                             end
                         end else begin
                             current_layer <= current_layer + 1;
-                            start_conv[current_layer + 1] <= 1;
+                            start_layer[current_layer + 1] <= 1;
                         end
                         layer_wait_counter <= 0;
                     end
 
-                    if (layer_wait_counter >= 1000000) begin // Timeout after about 10ms at 100MHz
+                    if (layer_wait_counter >= 25000000) begin // Timeout after about 10ms at 100MHz
                         layer_timeout <= 1;
                         state <= IDLE;
                     end
@@ -229,6 +248,7 @@ module superresolution #(
 
                 FINISH: begin
                     process_done <= 1;
+                    pixel_done <= 0;
                     state <= IDLE;
                 end
             endcase
@@ -241,7 +261,7 @@ module superresolution #(
             debug_leds[4] <= process_done;
             debug_leds[5] <= layer_timeout;
             debug_leds[6] <= (pixel_processed_counter > 0);
-            debug_leds[7] <= start_conv[0];
+            debug_leds[7] <= start_process;
         end
     end
 
@@ -274,15 +294,15 @@ module weight_loader #(
 endmodule
 
 module upsample_layer #(
-    parameter SCALE_FACTOR = 2,
     parameter IN_CHANNELS = 3,
-    parameter OUT_CHANNELS = 12, // 3 * (SCALE_FACTOR ** 2)
+    parameter OUT_CHANNELS = 12,
+    parameter KERNEL_SIZE = 3,
     parameter DATA_WIDTH = 8,
     parameter WEIGHT_ADDR_WIDTH = 20
 )(
     input wire clk,
     input wire rst_n,
-    input wire [9*IN_CHANNELS*DATA_WIDTH-1:0] pixel_in,
+    input wire [KERNEL_SIZE*KERNEL_SIZE*IN_CHANNELS*DATA_WIDTH-1:0] pixel_in,
     input wire load_weights,
     input wire [WEIGHT_ADDR_WIDTH-1:0] weight_addr,
     input wire start_conv,
@@ -291,149 +311,64 @@ module upsample_layer #(
     output reg [7:0] debug_leds
 );
     // Local parameters
-    localparam KERNEL_SIZE = 3;
-    localparam BRAM_DEPTH = IN_CHANNELS * OUT_CHANNELS * KERNEL_SIZE * KERNEL_SIZE + OUT_CHANNELS;
-
-    // Weight and bias memory
-    reg [DATA_WIDTH-1:0] weight_bias_mem [0:BRAM_DEPTH-1];
+    localparam TOTAL_WEIGHTS = IN_CHANNELS * OUT_CHANNELS * KERNEL_SIZE * KERNEL_SIZE;
     
-    // Intermediate results
-    reg signed [2*DATA_WIDTH+3:0] conv_result [0:OUT_CHANNELS-1];
-    wire signed [DATA_WIDTH-1:0] bias [0:OUT_CHANNELS-1];
+    // Internal signals
+    reg [DATA_WIDTH-1:0] weights [0:TOTAL_WEIGHTS-1];
+    reg [DATA_WIDTH-1:0] biases [0:OUT_CHANNELS-1];
+    reg [2*DATA_WIDTH-1:0] accum [0:OUT_CHANNELS-1];
     
-    // Counters and control signals
-    reg [7:0] out_channel_count;
-    reg [3:0] in_channel_count;
-    reg [3:0] kernel_row, kernel_col;
-    reg [2:0] state;
+    integer i, j, k;
     
-    // State machine states
-    localparam IDLE = 3'd0, LOAD = 3'd1, CONV = 3'd2, FINISH = 3'd3;
-
-    // Multiplication result
-    wire signed [2*DATA_WIDTH-1:0] mult_result;
-    reg signed [DATA_WIDTH-1:0] mult_a, mult_b;
-
-    // Assign biases
-    genvar i;
-    generate
-        for (i = 0; i < OUT_CHANNELS; i = i + 1) begin : bias_assign
-            assign bias[i] = weight_bias_mem[IN_CHANNELS * OUT_CHANNELS * KERNEL_SIZE * KERNEL_SIZE + i];
-        end
-    endgenerate
-
-    // Weight and bias loading logic
-    always @(posedge clk) begin
-        if (load_weights) begin
-            weight_bias_mem[weight_addr] <= pixel_in[DATA_WIDTH-1:0];
-        end
-    end
-
-    // Multiplication
-    assign mult_result = mult_a * mult_b;
-
-    // Main processing logic
+    // Sequential logic
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= IDLE;
-            out_channel_count <= 0;
-            in_channel_count <= 0;
-            kernel_row <= 0;
-            kernel_col <= 0;
             conv_done <= 0;
-            mult_a <= 0;
-            mult_b <= 0;
-            debug_leds <= 8'b0;
-            for (int j = 0; j < OUT_CHANNELS; j = j + 1) begin
-                conv_result[j] <= 0;
-                pixel_out[j*DATA_WIDTH +: DATA_WIDTH] <= 0;
+            for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= 0;
+                accum[i] <= 0;
             end
+            for (i = 0; i < TOTAL_WEIGHTS; i = i + 1) begin
+                weights[i] <= 0;
+            end
+            for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                biases[i] <= 0;
+            end
+            debug_leds <= 8'b0;
         end else begin
-            case (state)
-                IDLE: begin
-                    if (start_conv) begin
-                        state <= LOAD;
-                        out_channel_count <= 0;
-                        in_channel_count <= 0;
-                        kernel_row <= 0;
-                        kernel_col <= 0;
-                        conv_done <= 0;
-                        for (int j = 0; j < OUT_CHANNELS; j = j + 1) begin
-                            conv_result[j] <= 0;
+            if (load_weights) begin
+                if (weight_addr < TOTAL_WEIGHTS) begin
+                    weights[weight_addr] <= pixel_in[DATA_WIDTH-1:0];
+                end else if (weight_addr < TOTAL_WEIGHTS + OUT_CHANNELS) begin
+                    biases[weight_addr - TOTAL_WEIGHTS] <= pixel_in[DATA_WIDTH-1:0];
+                end
+            end else if (start_conv) begin
+                conv_done <= 0;
+                for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                    accum[i] <= 0;
+                    for (j = 0; j < IN_CHANNELS; j = j + 1) begin
+                        for (k = 0; k < KERNEL_SIZE*KERNEL_SIZE; k = k + 1) begin
+                            accum[i] <= accum[i] + pixel_in[(j*KERNEL_SIZE*KERNEL_SIZE + k)*DATA_WIDTH +: DATA_WIDTH] * 
+                                        weights[(i*IN_CHANNELS + j)*KERNEL_SIZE*KERNEL_SIZE + k];
                         end
                     end
+                    accum[i] <= accum[i] + biases[i];
                 end
+                conv_done <= 1;
+            end
 
-                LOAD: begin
-                    mult_a <= weight_bias_mem[out_channel_count * IN_CHANNELS * KERNEL_SIZE * KERNEL_SIZE + 
-                                              in_channel_count * KERNEL_SIZE * KERNEL_SIZE +
-                                              kernel_row * KERNEL_SIZE +
-                                              kernel_col];
-                    mult_b <= pixel_in[(in_channel_count * KERNEL_SIZE * KERNEL_SIZE + 
-                                        kernel_row * KERNEL_SIZE + 
-                                        kernel_col) * DATA_WIDTH +: DATA_WIDTH];
-                    state <= CONV;
+            if (conv_done) begin
+                for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                    pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= (accum[i][2*DATA_WIDTH-1]) ? 0 : 
+                                                             (|accum[i][2*DATA_WIDTH-2:DATA_WIDTH]) ? {DATA_WIDTH{1'b1}} : 
+                                                             accum[i][DATA_WIDTH-1:0];
                 end
+            end
 
-                CONV: begin
-                    conv_result[out_channel_count] <= conv_result[out_channel_count] + mult_result;
-
-                    if (kernel_col == KERNEL_SIZE - 1) begin
-                        kernel_col <= 0;
-                        if (kernel_row == KERNEL_SIZE - 1) begin
-                            kernel_row <= 0;
-                            if (in_channel_count == IN_CHANNELS - 1) begin
-                                in_channel_count <= 0;
-                                if (out_channel_count == OUT_CHANNELS - 1) begin
-                                    state <= FINISH;
-                                end else begin
-                                    out_channel_count <= out_channel_count + 1;
-                                    state <= LOAD;
-                                end
-                            end else begin
-                                in_channel_count <= in_channel_count + 1;
-                                state <= LOAD;
-                            end
-                        end else begin
-                            kernel_row <= kernel_row + 1;
-                            state <= LOAD;
-                        end
-                    end else begin
-                        kernel_col <= kernel_col + 1;
-                        state <= LOAD;
-                    end
-                end
-
-                FINISH: begin
-                    for (int j = 0; j < OUT_CHANNELS; j = j + 1) begin
-                        // Apply bias and activation
-                        if (conv_result[j] + {{(DATA_WIDTH+4){bias[j][DATA_WIDTH-1]}}, bias[j]} > {1'b0, {(DATA_WIDTH-1){1'b1}}}) begin
-                            pixel_out[j*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b1}};
-                        end else if (conv_result[j] + {{(DATA_WIDTH+4){bias[j][DATA_WIDTH-1]}}, bias[j]} < {1'b1, {(DATA_WIDTH-1){1'b0}}}) begin
-                            pixel_out[j*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b0}};
-                        end else begin
-                            pixel_out[j*DATA_WIDTH +: DATA_WIDTH] <= conv_result[j][DATA_WIDTH-1:0] + bias[j];
-                        end
-                    end
-                    conv_done <= 1;
-                    state <= IDLE;
-                end
-            endcase
+            debug_leds <= {conv_done, start_conv, load_weights, 5'b0};
         end
     end
-
-    // Debug LED logic
-    always @(posedge clk) begin
-        debug_leds[2:0] <= state;
-        debug_leds[3] <= start_conv;
-        debug_leds[4] <= conv_done;
-        debug_leds[5] <= load_weights;
-        debug_leds[6] <= (out_channel_count == OUT_CHANNELS - 1);
-        debug_leds[7] <= (state == CONV);
-    end
-
 endmodule
-
 module conv_layer #(
     parameter IN_CHANNELS = 3,
     parameter OUT_CHANNELS = 64,
