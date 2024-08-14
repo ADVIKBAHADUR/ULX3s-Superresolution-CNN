@@ -36,6 +36,7 @@ module superresolution #(
     // State machine states
     localparam IDLE = 3'd0, LOAD_WEIGHTS = 3'd1, PROCESS_LAYERS = 3'd2, FINISH = 3'd3;
     reg [2:0] state;
+    reg [7:0] upsample_leds, conv_led;
 
     // Debugging and control signals
     reg [31:0] debug_counter;
@@ -45,6 +46,10 @@ module superresolution #(
     reg layer_timeout;
     wire [CONV_LAYERS:0] layer_done;
     reg [CONV_LAYERS:0] start_layer;
+
+    // Input and output color check
+    reg input_has_color;
+    reg output_has_color;
 
     // Connect neighborhood to layer_input
     genvar n;
@@ -70,12 +75,12 @@ module superresolution #(
         .start_conv(start_layer[0]),
         .pixel_out(upsample_output),
         .conv_done(layer_done[0]),
-        .debug_leds()
+        .debug_leds(upsample_leds)
     );
 
     // Convolutional layers
     conv_layer #(
-        .IN_CHANNELS(12),
+        .IN_CHANNELS(3),
         .OUT_CHANNELS(9),
         .KERNEL_SIZE(KERNEL_SIZE),
         .DATA_WIDTH(8),
@@ -89,7 +94,7 @@ module superresolution #(
         .pixel_in(upsample_output),
         .pixel_out(conv1_output),
         .conv_done(layer_done[1]),
-        .debug_leds()
+        .debug_leds(conv_led)
     );
 
     conv_layer #(
@@ -188,6 +193,8 @@ module superresolution #(
             layer_timeout <= 0;
             debug_leds <= 8'b0;
             start_layer <= 0;
+            input_has_color <= 0;
+            output_has_color <= 0;
         end else begin
             debug_counter <= debug_counter + 1;
             
@@ -204,6 +211,9 @@ module superresolution #(
                         load_weights <= 1;
                         process_done <= 0;
                         weight_load_counter <= 0;
+                        
+                        // Check if input has color
+                        input_has_color <= (neighborhood != {9{24'h000000}}) && (neighborhood != {9{24'hFFFFFF}});
                     end
                 end
 
@@ -227,6 +237,10 @@ module superresolution #(
                             pixel_out <= relu_output;
                             pixel_done <= 1;
                             pixel_processed_counter <= pixel_processed_counter + 1;
+                            
+                            // Check if output has color
+                            output_has_color <= (relu_output != 24'h000000) && (relu_output != 24'hFFFFFF);
+                            
                             if (pixel_processed_counter >= WIDTH * HEIGHT - 1) begin
                                 state <= FINISH;
                             end else begin
@@ -253,18 +267,20 @@ module superresolution #(
                 end
             endcase
 
-            // Debug LED indicators
-            debug_leds[0] <= (state == IDLE);
-            debug_leds[1] <= (state == LOAD_WEIGHTS);
-            debug_leds[2] <= (state == PROCESS_LAYERS);
-            debug_leds[3] <= (state == FINISH);
-            debug_leds[4] <= process_done;
-            debug_leds[5] <= layer_timeout;
-            debug_leds[6] <= (pixel_processed_counter > 0);
-            debug_leds[7] <= start_process;
+            // // Debug LED indicators
+            // debug_leds[0] <= output_has_color;  // Output color check
+            // debug_leds[1] <= (state == LOAD_WEIGHTS);
+            // debug_leds[2] <= (state == PROCESS_LAYERS);
+            // debug_leds[3] <= (state == FINISH);
+            // debug_leds[4] <= process_done;
+            // debug_leds[5] <= layer_timeout;
+            // debug_leds[6] <= (pixel_processed_counter > 0);
+            // debug_leds[7] <= input_has_color;  // Input color check
+            debug_leds <= conv_led;
+
+        
         end
     end
-
 endmodule
 
 module weight_loader #(
@@ -314,11 +330,26 @@ module upsample_layer #(
     localparam TOTAL_WEIGHTS = IN_CHANNELS * OUT_CHANNELS * KERNEL_SIZE * KERNEL_SIZE;
     
     // Internal signals
-    reg [DATA_WIDTH-1:0] weights [0:TOTAL_WEIGHTS-1];
-    reg [DATA_WIDTH-1:0] biases [0:OUT_CHANNELS-1];
-    reg [2*DATA_WIDTH-1:0] accum [0:OUT_CHANNELS-1];
+    reg signed [DATA_WIDTH-1:0] weights [0:TOTAL_WEIGHTS-1];
+    reg signed [DATA_WIDTH-1:0] biases [0:OUT_CHANNELS-1];
+    reg signed [2*DATA_WIDTH+1:0] accum [0:OUT_CHANNELS-1];
+    
+    // Debug signals
+    reg weights_nonzero;
+    reg input_nonzero;
+    reg accum_nonzero;
+    reg bias_nonzero;
+    reg pre_output_nonzero;
+    reg output_nonzero;
+    reg [OUT_CHANNELS-1:0] channel_nonzero;
     
     integer i, j, k;
+    
+    // Temporary variables for convolution
+    reg signed [DATA_WIDTH-1:0] weight_val;
+    reg signed [DATA_WIDTH-1:0] input_val;
+    reg signed [2*DATA_WIDTH-1:0] mult_result;
+    reg signed [2*DATA_WIDTH+1:0] accum_with_bias;
     
     // Sequential logic
     always @(posedge clk or negedge rst_n) begin
@@ -335,37 +366,91 @@ module upsample_layer #(
                 biases[i] <= 0;
             end
             debug_leds <= 8'b0;
+            weights_nonzero <= 0;
+            input_nonzero <= 0;
+            accum_nonzero <= 0;
+            bias_nonzero <= 0;
+            pre_output_nonzero <= 0;
+            output_nonzero <= 0;
+            channel_nonzero <= 0;
         end else begin
             if (load_weights) begin
                 if (weight_addr < TOTAL_WEIGHTS) begin
-                    weights[weight_addr] <= pixel_in[DATA_WIDTH-1:0];
+                    weights[weight_addr] <= $signed(pixel_in[DATA_WIDTH-1:0]);
+                    if (pixel_in[DATA_WIDTH-1:0] != 0) begin
+                        weights_nonzero <= 1;
+                    end
                 end else if (weight_addr < TOTAL_WEIGHTS + OUT_CHANNELS) begin
-                    biases[weight_addr - TOTAL_WEIGHTS] <= pixel_in[DATA_WIDTH-1:0];
+                    biases[weight_addr - TOTAL_WEIGHTS] <= $signed(pixel_in[DATA_WIDTH-1:0]);
+                    if (pixel_in[DATA_WIDTH-1:0] != 0) begin
+                        bias_nonzero <= 1;
+                    end
                 end
             end else if (start_conv) begin
                 conv_done <= 0;
+                input_nonzero <= 0;
+                accum_nonzero <= 0;
+                pre_output_nonzero <= 0;
+                output_nonzero <= 0;
+                channel_nonzero <= 0;
+
+                // Check input
+                for (i = 0; i < KERNEL_SIZE*KERNEL_SIZE*IN_CHANNELS; i = i + 1) begin
+                    if (pixel_in[i*DATA_WIDTH +: DATA_WIDTH] != 0) begin
+                        input_nonzero <= 1;
+                    end
+                end
+
                 for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
                     accum[i] <= 0;
                     for (j = 0; j < IN_CHANNELS; j = j + 1) begin
                         for (k = 0; k < KERNEL_SIZE*KERNEL_SIZE; k = k + 1) begin
-                            accum[i] <= accum[i] + pixel_in[(j*KERNEL_SIZE*KERNEL_SIZE + k)*DATA_WIDTH +: DATA_WIDTH] * 
-                                        weights[(i*IN_CHANNELS + j)*KERNEL_SIZE*KERNEL_SIZE + k];
+                            weight_val = weights[(i*IN_CHANNELS + j)*KERNEL_SIZE*KERNEL_SIZE + k];
+                            input_val = $signed(pixel_in[(j*KERNEL_SIZE*KERNEL_SIZE + k)*DATA_WIDTH +: DATA_WIDTH]);
+                            mult_result = weight_val * input_val;
+                            accum[i] <= accum[i] + mult_result;
                         end
                     end
-                    accum[i] <= accum[i] + biases[i];
+                    accum_with_bias = accum[i] + {{(DATA_WIDTH+2){biases[i][DATA_WIDTH-1]}}, biases[i]};
+                    accum[i] <= accum_with_bias;
+                    
+                    if (accum_with_bias != 0) begin
+                        accum_nonzero <= 1;
+                        channel_nonzero[i] <= 1;
+                    end
                 end
                 conv_done <= 1;
             end
 
             if (conv_done) begin
                 for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
-                    pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= (accum[i][2*DATA_WIDTH-1]) ? 0 : 
-                                                             (|accum[i][2*DATA_WIDTH-2:DATA_WIDTH]) ? {DATA_WIDTH{1'b1}} : 
-                                                             accum[i][DATA_WIDTH-1:0];
+                    if (accum[i] > {{(DATA_WIDTH){1'b0}}, {DATA_WIDTH{1'b1}}}) begin
+                        pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b1}}; // Saturate to max positive
+                        pre_output_nonzero <= 1;
+                    end else if (accum[i] < {{(DATA_WIDTH){1'b1}}, {DATA_WIDTH{1'b0}}}) begin
+                        pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {1'b1, {(DATA_WIDTH-1){1'b0}}}; // Saturate to max negative
+                        pre_output_nonzero <= 1;
+                    end else begin
+                        pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= accum[i][DATA_WIDTH-1:0]; // Normal case
+                        if (accum[i][DATA_WIDTH-1:0] != 0) begin
+                            pre_output_nonzero <= 1;
+                        end
+                    end
+                    if (pixel_out[i*DATA_WIDTH +: DATA_WIDTH] != 0) begin
+                        output_nonzero <= 1;
+                    end
                 end
             end
 
-            debug_leds <= {conv_done, start_conv, load_weights, 5'b0};
+            // Update debug LEDs
+            debug_leds[0] <= weights_nonzero;
+            debug_leds[1] <= input_nonzero;
+            debug_leds[2] <= accum_nonzero;
+            debug_leds[3] <= bias_nonzero;
+            debug_leds[4] <= pre_output_nonzero;
+            debug_leds[5] <= output_nonzero;
+            debug_leds[6] <= |channel_nonzero;
+            debug_leds[7] <= conv_done;
         end
     end
 endmodule
@@ -391,39 +476,57 @@ module conv_layer #(
     localparam TOTAL_MEM_DEPTH = WEIGHT_MEM_DEPTH + BIAS_MEM_DEPTH;
     
     // BRAM for weights and biases
-    reg [DATA_WIDTH-1:0] weight_bias_mem [0:TOTAL_MEM_DEPTH-1];
+    reg signed [DATA_WIDTH-1:0] weight_bias_mem [0:TOTAL_MEM_DEPTH-1];
     reg [WEIGHT_ADDR_WIDTH-1:0] bram_addr;
-    wire [DATA_WIDTH-1:0] bram_data_out;
+    wire signed [DATA_WIDTH-1:0] bram_data_out;
     
     // Intermediate results
-    reg signed [2*DATA_WIDTH+3:0] conv_result;
+    reg signed [2*DATA_WIDTH+1:0] accum [0:OUT_CHANNELS-1];
     
-    // Counters
+    // Counters and state
     reg [7:0] out_channel_count;
     reg [7:0] in_channel_count;
     reg [3:0] kernel_row, kernel_col;
-    
-    // State machine
     reg [2:0] state;
     localparam IDLE = 3'd0, LOAD = 3'd1, CONV = 3'd2, FINISH = 3'd3;
 
-    // DSP block for multiplication
-    wire signed [2*DATA_WIDTH-1:0] mult_result;
-    reg signed [DATA_WIDTH-1:0] mult_a, mult_b;
+    // Debug signals
+    reg weights_nonzero;
+    reg input_nonzero;
+    reg accum_nonzero;
+    reg bias_nonzero;
+    reg pre_output_nonzero;
+    reg output_nonzero;
+    reg [OUT_CHANNELS-1:0] channel_nonzero;
+    reg [7:0] weight_load_count;
 
-    DSP_MULT #(
-        .DATA_WIDTH(DATA_WIDTH)
-    ) dsp_mult (
-        .clk(clk),
-        .a(mult_a),
-        .b(mult_b),
-        .p(mult_result)
-    );
+    // Temporary variables for convolution
+    reg signed [DATA_WIDTH-1:0] weight_val;
+    reg signed [DATA_WIDTH-1:0] input_val;
+    reg signed [2*DATA_WIDTH-1:0] mult_result;
+    reg signed [2*DATA_WIDTH+1:0] accum_with_bias;
+
+    integer i, j, k;
 
     // BRAM read/write logic
-    always @(posedge clk) begin
-        if (load_weights) begin
-            weight_bias_mem[weight_addr] <= bram_data_out;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (i = 0; i < TOTAL_MEM_DEPTH; i = i + 1) begin
+                weight_bias_mem[i] <= 0;
+            end
+            weights_nonzero <= 0;
+            bias_nonzero <= 0;
+            weight_load_count <= 0;
+        end else if (load_weights) begin
+            weight_bias_mem[weight_addr] <= $signed(pixel_in[DATA_WIDTH-1:0]);
+            if (pixel_in[DATA_WIDTH-1:0] != 0) begin
+                if (weight_addr < WEIGHT_MEM_DEPTH) begin
+                    weights_nonzero <= 1;
+                end else begin
+                    bias_nonzero <= 1;
+                end
+            end
+            weight_load_count <= weight_load_count + 1;
         end
     end
 
@@ -438,10 +541,16 @@ module conv_layer #(
             kernel_row <= 0;
             kernel_col <= 0;
             conv_done <= 0;
-            conv_result <= 0;
             bram_addr <= 0;
-            mult_a <= 0;
-            mult_b <= 0;
+            input_nonzero <= 0;
+            accum_nonzero <= 0;
+            pre_output_nonzero <= 0;
+            output_nonzero <= 0;
+            channel_nonzero <= 0;
+            for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                accum[i] <= 0;
+                pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= 0;
+            end
         end else begin
             case (state)
                 IDLE: begin
@@ -451,8 +560,21 @@ module conv_layer #(
                         in_channel_count <= 0;
                         kernel_row <= 0;
                         kernel_col <= 0;
-                        conv_result <= 0;
-                        bram_addr <= 0;
+                        input_nonzero <= 0;
+                        accum_nonzero <= 0;
+                        pre_output_nonzero <= 0;
+                        output_nonzero <= 0;
+                        channel_nonzero <= 0;
+                        for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                            accum[i] <= 0;
+                        end
+
+                        // Check input
+                        for (i = 0; i < KERNEL_SIZE*KERNEL_SIZE*IN_CHANNELS; i = i + 1) begin
+                            if (pixel_in[i*DATA_WIDTH +: DATA_WIDTH] != 0) begin
+                                input_nonzero <= 1;
+                            end
+                        end
                     end
                 end
 
@@ -466,9 +588,10 @@ module conv_layer #(
 
                 CONV: begin
                     // Perform convolution
-                    mult_a <= bram_data_out;
-                    mult_b <= pixel_in[(kernel_row*KERNEL_SIZE*IN_CHANNELS + kernel_col*IN_CHANNELS + in_channel_count)*DATA_WIDTH +: DATA_WIDTH];
-                    conv_result <= conv_result + mult_result;
+                    weight_val = bram_data_out;
+                    input_val = $signed(pixel_in[(kernel_row*KERNEL_SIZE*IN_CHANNELS + kernel_col*IN_CHANNELS + in_channel_count)*DATA_WIDTH +: DATA_WIDTH]);
+                    mult_result = weight_val * input_val;
+                    accum[out_channel_count] <= accum[out_channel_count] + mult_result;
 
                     // Update counters
                     if (kernel_col == KERNEL_SIZE - 1) begin
@@ -498,27 +621,37 @@ module conv_layer #(
                 end
 
                 FINISH: begin
-                    // Apply bias
-                    bram_addr <= WEIGHT_MEM_DEPTH + out_channel_count;
-                    conv_result <= conv_result + {{(DATA_WIDTH+4){bram_data_out[DATA_WIDTH-1]}}, bram_data_out};
-                    
-                    // Apply activation and store result
-                    if (conv_result > {1'b0, {(DATA_WIDTH-1){1'b1}}}) begin
-                        pixel_out[out_channel_count*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b1}};
-                    end else if (conv_result < {1'b1, {(DATA_WIDTH-1){1'b0}}}) begin
-                        pixel_out[out_channel_count*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b0}};
-                    end else begin
-                        pixel_out[out_channel_count*DATA_WIDTH +: DATA_WIDTH] <= conv_result[DATA_WIDTH-1:0];
+                    for (i = 0; i < OUT_CHANNELS; i = i + 1) begin
+                        // Apply bias
+                        bram_addr <= WEIGHT_MEM_DEPTH + i;
+                        accum_with_bias = accum[i] + {{(DATA_WIDTH+2){bram_data_out[DATA_WIDTH-1]}}, bram_data_out};
+                        
+                        if (accum_with_bias != 0) begin
+                            accum_nonzero <= 1;
+                            channel_nonzero[i] <= 1;
+                        end
+
+                        // Apply activation and store result
+                        if (accum_with_bias > {{(DATA_WIDTH){1'b0}}, {DATA_WIDTH{1'b1}}}) begin
+                            pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {DATA_WIDTH{1'b1}}; // Saturate to max positive
+                            pre_output_nonzero <= 1;
+                        end else if (accum_with_bias < {{(DATA_WIDTH){1'b1}}, {DATA_WIDTH{1'b0}}}) begin
+                            pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= {1'b1, {(DATA_WIDTH-1){1'b0}}}; // Saturate to max negative
+                            pre_output_nonzero <= 1;
+                        end else begin
+                            pixel_out[i*DATA_WIDTH +: DATA_WIDTH] <= accum_with_bias[DATA_WIDTH-1:0]; // Normal case
+                            if (accum_with_bias[DATA_WIDTH-1:0] != 0) begin
+                                pre_output_nonzero <= 1;
+                            end
+                        end
+
+                        if (pixel_out[i*DATA_WIDTH +: DATA_WIDTH] != 0) begin
+                            output_nonzero <= 1;
+                        end
                     end
 
-                    if (out_channel_count == OUT_CHANNELS - 1) begin
-                        conv_done <= 1;
-                        state <= IDLE;
-                    end else begin
-                        out_channel_count <= out_channel_count + 1;
-                        conv_result <= 0;
-                        state <= LOAD;
-                    end
+                    conv_done <= 1;
+                    state <= IDLE;
                 end
             endcase
         end
@@ -526,12 +659,14 @@ module conv_layer #(
 
     // Debug LED logic
     always @(posedge clk) begin
-        debug_leds[2:0] <= state;
-        debug_leds[3] <= start_conv;
-        debug_leds[4] <= conv_done;
-        debug_leds[5] <= load_weights;
-        debug_leds[6] <= (out_channel_count == OUT_CHANNELS - 1);
-        debug_leds[7] <= (state == CONV);
+        debug_leds[0] <= weights_nonzero;
+        debug_leds[1] <= input_nonzero;
+        debug_leds[2] <= accum_nonzero;
+        debug_leds[3] <= bias_nonzero;
+        debug_leds[4] <= pre_output_nonzero;
+        debug_leds[5] <= output_nonzero;
+        debug_leds[6] <= |channel_nonzero;
+        debug_leds[7] <= (weight_load_count > 0);
     end
 endmodule
 

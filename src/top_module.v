@@ -157,18 +157,19 @@ module top_module(
         .gpdi_dp(gpdi_dp)
     );
     
-    SuperResolutionSubTop m3 (    
-        .clk_w(clk_25_out),
-        .clk_r(clk_sdram),
-        .rst_n(rst_n),
-        .din(dout_sobel), //data from camera fifo
-        .data_count_r_sobel(data_count_r_sobel),
-        .rd_fifo(rd_sobel), 
-        .rd_fifo_cam(rd_en_sobel),
-        .dout(sobel_data), //data to be stored in sdram
-        .data_count_r(data_count_sobel), 
-        .led_s(led_s)
-    );
+	SuperResolutionSubTop m3 (    
+		.clk_w(clk_25_out),
+		.clk_r(clk_sdram),
+		.rst_n(rst_n),
+		.din(dout_sobel),
+		.data_count_r_sobel(data_count_r_sobel),
+		.rd_fifo(rd_sobel), 
+		.rd_fifo_cam(rd_en_sobel),
+		.dout(sobel_data),
+		.data_count_r(data_count_sobel), 
+		.frame_done(frame_done),  // Add this signal
+		.led_s(led_s)
+	);
      
     debounce_explicit m5 (
         .clk(clk_25_out),
