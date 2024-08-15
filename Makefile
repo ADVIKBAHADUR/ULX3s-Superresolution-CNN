@@ -29,6 +29,11 @@ VERILOG_FILES = \
   src/ecp5pll.sv \
   src/SubTop_superresolution.v \
   src/superresolution.v \
+  src/weight_loader.v \
+  src/upscaling.v \
+  src/conv_layer.v \
+  src/dsp.v \
+  src/relu.v \
   src/asyn_fifo.v \
   src/camera_interface.v \
   src/debounce_explicit.v \

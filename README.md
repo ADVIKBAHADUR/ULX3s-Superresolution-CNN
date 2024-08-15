@@ -64,6 +64,13 @@ This project implements a real-time super-resolution image processing system on 
    - Key[1]: Decrease brightness
    - Key[2]: Increase contrast
    - Key[3]: Decrease contrast
+## Simulation
+Run this in the src/ folder
+   `iverilog -o superresolution_tb \    ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/cells_sim.v \    -I ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/ \    ~/Downloads/oss-cad-suite-linux-x64-20240702/oss-cad-suite/share/yosys/ecp5/cells_bb.v \    conv_layer.v dsp.v relu.v upscaling.v weight_loader.v \    superresolution.v \    superresolutiontb.v`
+
+Followed by:
+`vvp superresolution_tb `
+`gtkwave waveform.vcd `
 
 ## Module Descriptions
 

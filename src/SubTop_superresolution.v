@@ -1,7 +1,7 @@
 module SuperResolutionSubTop #(
     parameter WIDTH = 320,
     parameter HEIGHT = 240,
-    parameter PIXEL_WIDTH = 24,
+    parameter PIXEL_WIDTH = 16,
     parameter WEIGHT_ADDR_WIDTH = 18
 ) (
     input wire clk_w, clk_r, rst_n,
@@ -22,7 +22,7 @@ module SuperResolutionSubTop #(
     reg [7:0] led_subtop;
     reg [7:0] superres;
 
-    assign led_s = superres;
+    assign led_s = led_subtop;
 
     // State machine states
     localparam IDLE = 3'd0, CAPTURE = 3'd1, PROCESS = 3'd2, WAIT_PROCESS = 3'd3, OUTPUT = 3'd4;
@@ -87,8 +87,7 @@ module SuperResolutionSubTop #(
         .y_in(process_addr / WIDTH),
         .neighborhood(neighborhood),
         .pixel_out(processed_pixel),
-        .pixel_done(pixel_done),
-        .debug_leds(superres)
+        .pixel_done(pixel_done)
     );
 
     // Output FIFO
@@ -173,10 +172,10 @@ module SuperResolutionSubTop #(
             end
 
             // LED indicators
-            led_subtop[0] <= (state == IDLE);
-            led_subtop[1] <= (state == CAPTURE);
-            led_subtop[2] <= (state == PROCESS);
-            led_subtop[3] <= (data_received_counter > 0);
+            led_subtop[0] <= (state == IDLE ? 1 : (state = OUTPUT ? 1: 0));
+            led_subtop[1] <= (state == CAPTURE ? 1 : (state = OUTPUT ? 1: 0));
+            led_subtop[2] <= (state == PROCESS ? 1 : (state = OUTPUT ? 1: 0));
+            led_subtop[3] <= pixel_done;
             led_subtop[4] <= (pixel_data == 24'h000000); // New check for black pixels
             led_subtop[5] <= (write_addr >= 76799);
             led_subtop[6] <= (data_count_r_sobel > 5);
@@ -234,10 +233,12 @@ module SuperResolutionSubTop #(
 
             OUTPUT: begin
                 next_write_fifo = 0;
-                if (debug_counter[10]) begin
-                    next_state = IDLE;
-                    next_processing_done = 0;
-                end
+                next_state = IDLE;
+                next_processing_done = 0;
+                // if (debug_counter[10]) begin
+                //     next_state = IDLE;
+                //     next_processing_done = 0;
+                // end
             end
         endcase
     end

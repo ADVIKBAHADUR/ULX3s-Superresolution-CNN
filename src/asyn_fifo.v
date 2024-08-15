@@ -142,18 +142,26 @@ endmodule
 // Dual-port BRAM module
 module dual_port_bram #(
     parameter DATA_WIDTH = 24,
-    parameter ADDR_WIDTH = 18
+    parameter ADDR_WIDTH = 19
 ) (
-    input wire clka, clkb,
-    input wire ena, enb,
-    input wire wea, web,
-    input wire [ADDR_WIDTH-1:0] addra, addrb,
-    input wire [DATA_WIDTH-1:0] dia, dib,
-    output reg [DATA_WIDTH-1:0] doa, dob
+    input wire clka,
+    input wire clkb,
+    input wire ena,
+    input wire enb,
+    input wire wea,
+    input wire web,
+    input wire [ADDR_WIDTH-1:0] addra,
+    input wire [ADDR_WIDTH-1:0] addrb,
+    input wire [DATA_WIDTH-1:0] dia,
+    input wire [DATA_WIDTH-1:0] dib,
+    output reg [DATA_WIDTH-1:0] doa,
+    output reg [DATA_WIDTH-1:0] dob
 );
 
-    reg [DATA_WIDTH-1:0] ram [0:(1<<ADDR_WIDTH)-1];
+    // Declare the RAM variable
+    reg [DATA_WIDTH-1:0] ram[2**ADDR_WIDTH-1:0];
 
+    // Port A
     always @(posedge clka) begin
         if (ena) begin
             if (wea)
@@ -162,6 +170,7 @@ module dual_port_bram #(
         end
     end
 
+    // Port B
     always @(posedge clkb) begin
         if (enb) begin
             if (web)
